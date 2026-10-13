@@ -74,7 +74,7 @@
               wasm-pack
               python3
             ])
-            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin (
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin (
               with pkgs; [
                 libiconv
               ]
@@ -83,7 +83,7 @@
           TARGET_CC = "${pkgs.stdenv.cc}/bin/${pkgs.stdenv.cc.targetPrefix}cc";
           LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
           ELECTRON_OVERRIDE_DIST_PATH =
-            if pkgs.stdenv.isDarwin
+            if pkgs.stdenv.hostPlatform.isDarwin
             then "${pkgs.electron}/Applications/"
             else "${pkgs.electron}/bin";
           PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = true;
