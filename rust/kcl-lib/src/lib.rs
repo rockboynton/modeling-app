@@ -56,6 +56,8 @@ macro_rules! eprint {
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod check;
 pub mod collections;
 mod docs;
 mod engine;
