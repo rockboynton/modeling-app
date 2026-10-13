@@ -135,9 +135,7 @@ async fn main() -> Result<()> {
 async fn run_cmd(opts: &Opts) -> Result<()> {
     match &opts.subcmd {
         SubCommand::Server(s) => {
-            let (service, socket) = LspService::new(|client| {
-                kcl_language_server::KclLspBackend::new(client, Default::default(), kittycad::Client::new("")).unwrap()
-            });
+            let (service, socket) = standalone_service().await;
 
             // TODO find a way to ctrl+c on windows.
             #[cfg(not(target_os = "windows"))]
@@ -179,4 +177,79 @@ async fn run_cmd(opts: &Opts) -> Result<()> {
     }
 
     Ok(())
+}
+
+// The standalone editor has no live engine session. Mock execution still
+// checks argument types and collects deprecations without authentication.
+async fn standalone_service() -> (LspService<kcl_language_server::KclLspBackend>, tower_lsp::ClientSocket) {
+    let executor = kcl_lib::ExecutorContext::new_mock(None).await;
+    LspService::new(|client| {
+        kcl_language_server::KclLspBackend::new(client, Some(executor), kittycad::Client::new("")).unwrap()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use tower_lsp::LanguageServer;
+    use tower_lsp::lsp_types::*;
+
+    use super::standalone_service;
+
+    #[tokio::test]
+    async fn standalone_execution_diagnostics() {
+        // Exercise the executable's factory, rather than a mock-only test
+        // factory that could pass while the executable disables execution.
+        let (service, socket) = standalone_service().await;
+        // This test checks the backend map directly. Close the unused socket
+        // so outgoing notifications cannot fill its undrained queue.
+        drop(socket);
+        let server = service.inner();
+        server.initialize(InitializeParams::default()).await.unwrap();
+        server.initialized(InitializedParams {}).await;
+        let uri: Url = "file:///test.kcl".parse().unwrap();
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "kcl".into(),
+                    version: 1,
+                    text: "@settings(kclVersion = 2.0)\np = startSketchOn(XY)\n".into(),
+                },
+            })
+            .await;
+        {
+            let diagnostics = server.diagnostics_map.get(uri.as_str()).expect("missing deprecation");
+            let warning = diagnostics
+                .iter()
+                .find(|d| d.message.contains("`startSketchOn` is deprecated"))
+                .expect("missing startSketchOn deprecation");
+            assert_eq!(warning.severity, Some(DiagnosticSeverity::WARNING));
+            assert_eq!(warning.range.start.line, 1);
+        }
+        server.did_change(DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier { uri: uri.clone(), version: 2 },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None, range_length: None,
+                text: "@settings(kclVersion = 2.0)\np = sketch(on = XY) {\n  bottom = line(start = [0, 0], end = [4, 0])\n  right = line(start = bottom.end, end = [4, 3])\n}\n".into(),
+            }],
+        }).await;
+        {
+            let diagnostics = server.diagnostics_map.get(uri.as_str()).expect("missing type error");
+            let error = diagnostics
+                .iter()
+                .find(|d| d.message.contains("Point2d") && d.message.contains("Segment"))
+                .expect("missing Point2d/Segment mismatch");
+            assert_eq!(error.severity, Some(DiagnosticSeverity::ERROR));
+            assert_eq!(error.range.start.line, 3);
+            assert!(!diagnostics.iter().any(|d| d.message.contains("startSketchOn")));
+        }
+        server.did_change(DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier { uri: uri.clone(), version: 3 },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None, range_length: None,
+                text: "@settings(kclVersion = 2.0)\np = sketch(on = XY) {\n  bottom = line(start = [0, 0], end = [4, 0])\n  right = line(start = [4, 0], end = [4, 3])\n}\n".into(),
+            }],
+        }).await;
+        assert!(server.diagnostics_map.get(uri.as_str()).is_none());
+    }
 }
