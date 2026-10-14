@@ -82,6 +82,15 @@ command = "/Users/adamchalmers/kc-repos/kcl-lsp/target/release/kcl-language-serv
 args = ["server", "--stdio"]
 ```
 
+## Editing features
+
+The standalone native server checks each document with fresh mock execution,
+using its actual file path and nearest optional `project.toml`. Imports resolve
+from the entry point's directory and open imported buffers are read before disk.
+Changes and closes refresh other open documents in that project; saving reloads
+project settings. These diagnostics require no API token and do not establish
+engine geometry correctness.
+
 ## Development
 
 ```bash

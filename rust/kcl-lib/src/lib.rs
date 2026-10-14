@@ -131,6 +131,7 @@ pub mod lsp_support {
 
     pub mod fs {
         pub use crate::fs::FileManager;
+        pub use crate::fs::FileSystem;
         pub use crate::fs::FileSystemHandle;
         pub use crate::fs::new_file_system_handle;
 

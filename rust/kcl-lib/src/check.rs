@@ -201,6 +201,24 @@ pub async fn check_file(path: impl AsRef<Path>) -> anyhow::Result<CheckOutcome> 
     let requested = path.as_ref();
     let path = std::fs::canonicalize(requested)
         .with_context(|| format!("Cannot resolve KCL entry point {}", requested.display()))?;
+    let settings = settings_for_file(&path)?;
+    let source =
+        std::fs::read_to_string(&path).with_context(|| format!("Cannot read KCL source {}", path.display()))?;
+    Ok(check_source(&source, settings).await)
+}
+
+/// Resolve project settings for a native editor's entry point, including a file
+/// whose unsaved contents have not been written to disk yet.
+/// Imports resolve from the entry point's parent, while project.toml is searched
+/// through its ancestors. The caller supplies source text separately.
+pub fn settings_for_file(path: &Path) -> anyhow::Result<ExecutorSettings> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("Cannot resolve working directory")?
+            .join(path)
+    };
     let directory = path.parent().context("KCL entry point has no parent directory")?;
     let mut settings = ExecutorSettings::default();
     for ancestor in directory.ancestors() {
@@ -218,9 +236,7 @@ pub async fn check_file(path: impl AsRef<Path>) -> anyhow::Result<CheckOutcome> 
             }
         }
     }
-    settings.current_file = Some(TypedPath(path.clone()));
+    settings.current_file = Some(TypedPath(path.to_path_buf()));
     settings.project_directory = Some(TypedPath(directory.to_path_buf()));
-    let source =
-        std::fs::read_to_string(&path).with_context(|| format!("Cannot read KCL source {}", path.display()))?;
-    Ok(check_source(&source, settings).await)
+    Ok(settings)
 }

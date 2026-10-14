@@ -126,6 +126,8 @@ use crate::parsing::token::adapter;
 
 pub mod custom_notifications;
 mod hover;
+#[cfg(not(target_arch = "wasm32"))]
+mod project;
 
 const SEMANTIC_TOKEN_TYPES: [SemanticTokenType; 10] = [
     SemanticTokenType::NUMBER,
@@ -190,6 +192,8 @@ pub struct Backend {
     pub ast_map: DashMap<String, crate::Program>,
     /// Current code.
     pub code_map: DashMap<String, Vec<u8>>,
+    /// Documents whose contents are owned by the editor rather than disk.
+    pub open_documents: DashMap<String, ()>,
     /// Diagnostics.
     pub diagnostics_map: DashMap<String, Vec<Diagnostic>>,
     /// Symbols map.
@@ -270,6 +274,7 @@ impl Backend {
             ast_map: Default::default(),
             code_map: Default::default(),
             diagnostics_map: Default::default(),
+            open_documents: Default::default(),
             symbols_map: Default::default(),
             semantic_tokens_map: Default::default(),
             is_initialized: Default::default(),
@@ -592,7 +597,7 @@ impl crate::lsp::backend::Backend for Backend {
         }
 
         // Execute the code if we have an executor context.
-        let outcome = self.execute(&ast).await;
+        let outcome = self.execute(&ast, &params.uri).await;
 
         // Execution is the last producer of Error and Warning diagnostics, so any
         // the map still holds came from an earlier pass. This publish replaces
@@ -916,7 +921,11 @@ impl Backend {
     ///
     /// Returns no issues when this server is not set up to execute. The caller
     /// publishes the diagnostics, so that one publish carries the whole pass.
-    async fn execute(&self, ast: &Program) -> Result<Vec<CompilationIssue>, KclErrorWithOutputs> {
+    async fn execute(
+        &self,
+        ast: &Program,
+        _uri: &tower_lsp::lsp_types::Url,
+    ) -> Result<Vec<CompilationIssue>, KclErrorWithOutputs> {
         // Check if we can execute.
         if !self.can_execute().await {
             return Ok(Vec::new());
@@ -931,6 +940,11 @@ impl Backend {
         if !self.is_initialized().await {
             // We are not initialized yet.
             return Ok(Vec::new());
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if executor_ctx.is_mock() && _uri.scheme() == "file" {
+            return self.execute_project_document(ast, _uri).await;
         }
 
         // Use run_mock for mock contexts, run_with_caching for live contexts
@@ -1117,7 +1131,11 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        self.do_did_change_watched_files(params).await
+        #[cfg(not(target_arch = "wasm32"))]
+        for change in &params.changes {
+            self.refresh_project_documents(&change.uri).await;
+        }
+        self.do_did_change_watched_files(params).await;
     }
 
     async fn did_create_files(&self, params: CreateFilesParams) {
@@ -1133,19 +1151,66 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.do_did_open(params).await
+        self.open_documents.insert(params.text_document.uri.to_string(), ());
+        #[cfg(not(target_arch = "wasm32"))]
+        let uri = params.text_document.uri.clone();
+        self.do_did_open(params).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refresh_project_documents(&uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let uri = params.text_document.uri.clone();
         self.do_did_change(params).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refresh_project_documents(&uri).await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        self.do_did_save(params).await
+        #[cfg(not(target_arch = "wasm32"))]
+        let uri = params.text_document.uri.clone();
+        self.do_did_save(params).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self
+            .executor_ctx
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(crate::execution::ExecutorContext::is_mock)
+        {
+            if let Some(text) = self
+                .code_map
+                .get(uri.as_str())
+                .and_then(|text| String::from_utf8(text.clone()).ok())
+            {
+                self.inner_on_change(
+                    TextDocumentItem {
+                        uri: uri.clone(),
+                        text,
+                        version: 0,
+                        language_id: "kcl".into(),
+                    },
+                    true,
+                )
+                .await;
+            }
+            self.refresh_project_documents(&uri).await;
+        }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let uri = params.text_document.uri.clone();
+        self.open_documents.remove(uri.as_str());
+        self.code_map.remove(uri.as_str());
+        self.token_map.remove(uri.as_str());
+        self.semantic_tokens_map.remove(uri.as_str());
+        self.remove_from_ast_maps(uri.as_str());
+        self.diagnostics_map.remove(uri.as_str());
+        self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
         self.do_did_close(params).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refresh_project_documents(&uri).await;
     }
 
     async fn hover(&self, params: HoverParams) -> RpcResult<Option<LspHover>> {
