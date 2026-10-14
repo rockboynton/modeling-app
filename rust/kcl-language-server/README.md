@@ -84,11 +84,13 @@ args = ["server", "--stdio"]
 
 ## Editing features
 
-The server provides go-to-definition for lexical KCL bindings,
+The server provides go-to-definition and references for lexical KCL bindings,
 including variables, functions, parameters, named imports and aliases, module
 members, and unambiguous glob imports. Navigation uses the AST rather than
 execution results, respects lexical scopes and export visibility, and prefers
-open editor buffers over disk contents. Built-in functions continue to provide hover documentation;
+open editor buffers over disk contents. Native reference searches include KCL
+files in the project (nearest `project.toml`, or the containing workspace folder)
+and imported modules. Built-in functions continue to provide hover documentation;
 object fields and built-in definitions are not navigable source bindings.
 
 The standalone native server checks each document with fresh mock execution,

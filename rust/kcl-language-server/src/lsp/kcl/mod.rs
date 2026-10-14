@@ -1049,9 +1049,12 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, format!("initialize: {params:?}"))
             .await;
 
+        self.add_workspace_folders(params.workspace_folders.unwrap_or_default())
+            .await;
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 color_provider: Some(ColorProviderCapability::Simple(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
                     code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
@@ -1220,6 +1223,15 @@ impl LanguageServer for Backend {
         params: tower_lsp::lsp_types::GotoDefinitionParams,
     ) -> RpcResult<Option<tower_lsp::lsp_types::GotoDefinitionResponse>> {
         Ok(self.navigation_definition(params.text_document_position_params).await)
+    }
+
+    async fn references(
+        &self,
+        params: tower_lsp::lsp_types::ReferenceParams,
+    ) -> RpcResult<Option<Vec<tower_lsp::lsp_types::Location>>> {
+        Ok(self
+            .navigation_references(params.text_document_position, params.context.include_declaration)
+            .await)
     }
 
     async fn hover(&self, params: HoverParams) -> RpcResult<Option<LspHover>> {

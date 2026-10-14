@@ -20,6 +20,15 @@ use crate::SourceRange;
 use crate::fs::FileSystem;
 use crate::fs::FileSystemHandle;
 
+pub(super) fn project_root(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or(path);
+    parent
+        .ancestors()
+        .find(|dir| dir.join("project.toml").exists())
+        .unwrap_or(parent)
+        .to_path_buf()
+}
+
 pub(super) fn normalize(path: &Path) -> PathBuf {
     // Normalization must also work for a newly created, unsaved file.
     let mut result = PathBuf::new();
@@ -36,6 +45,19 @@ pub(super) fn normalize(path: &Path) -> PathBuf {
 }
 
 impl Backend {
+    pub(super) fn document_project_root(&self, path: &Path) -> PathBuf {
+        let root = project_root(path);
+        if root.join("project.toml").exists() {
+            return root;
+        }
+        self.workspace_folders
+            .iter()
+            .filter_map(|folder| folder.uri.to_file_path().ok())
+            .filter(|folder| path.starts_with(folder))
+            .max_by_key(|folder| folder.components().count())
+            .unwrap_or(root)
+    }
+
     pub(super) async fn execute_project_document(
         &self,
         ast: &Program,
@@ -261,7 +283,7 @@ mod tests {
         }));
     }
     #[tokio::test]
-    async fn project_definition_follows_unsaved_imports() {
+    async fn project_navigation_finds_disk_imports_and_unsaved_references() {
         let dir = tempfile::tempdir().unwrap();
         let dims = dir.path().join("dimensions with spaces.kcl");
         std::fs::write(&dims, "export width = 7\n").unwrap();
@@ -278,6 +300,10 @@ mod tests {
         };
         assert_eq!(definition.uri, Url::from_file_path(&dims).unwrap());
         assert_eq!(definition.range.start, Position::new(0, 7));
+        let refs = server.navigation_references(params.clone(), false).await.unwrap();
+        assert_eq!(refs.len(), 3); // imported name, alias, and a = w
+        let refs = server.navigation_references(params.clone(), true).await.unwrap();
+        assert_eq!(refs.len(), 4); // plus the exported declaration on disk
         open(&server, &dims, "// unsaved header\nexport width = 8\n").await;
         let Some(GotoDefinitionResponse::Scalar(definition)) = server.navigation_definition(params).await else {
             panic!("missing unsaved definition");

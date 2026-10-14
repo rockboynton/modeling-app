@@ -380,8 +380,41 @@ fn document_path(uri: &Url) -> Option<kcl_lib::TypedPath> {
 }
 
 impl Backend {
-    async fn navigation_index(&self, uri: &Url) -> Index {
+    async fn navigation_index(&self, uri: &Url, workspace: bool) -> Index {
         let mut pending = vec![uri.clone()];
+        if workspace {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Ok(path) = uri.to_file_path() {
+                let root = self.document_project_root(&path);
+                let mut directories = vec![root];
+                while let Some(directory) = directories.pop() {
+                    let Ok(entries) = std::fs::read_dir(directory) else {
+                        continue;
+                    };
+                    for entry in entries.flatten() {
+                        let Ok(kind) = entry.file_type() else {
+                            continue;
+                        };
+                        if kind.is_dir()
+                            && ![".git", ".jj", "node_modules", "target"]
+                                .contains(&entry.file_name().to_string_lossy().as_ref())
+                        {
+                            directories.push(entry.path());
+                        } else if kind.is_file()
+                            && entry.path().extension().is_some_and(|ext| ext == "kcl")
+                            && let Ok(uri) = Url::from_file_path(entry.path())
+                        {
+                            pending.push(uri);
+                        }
+                    }
+                }
+            }
+            pending.extend(
+                self.open_documents
+                    .iter()
+                    .filter_map(|entry| Url::parse(entry.key()).ok()),
+            );
+        }
         let mut index = BTreeMap::new();
         let mut visited = HashSet::new();
         while let Some(uri) = pending.pop() {
@@ -409,7 +442,7 @@ impl Backend {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) async fn document_imports(&self, document: &Url, dependency: &Url) -> bool {
-        self.navigation_index(document)
+        self.navigation_index(document, false)
             .await
             .values()
             .any(|document| document.imports.contains(dependency))
@@ -431,7 +464,7 @@ impl Backend {
         &self,
         params: TextDocumentPositionParams,
     ) -> Option<GotoDefinitionResponse> {
-        let index = self.navigation_index(&params.text_document.uri).await;
+        let index = self.navigation_index(&params.text_document.uri, false).await;
         let mut symbol = if let Some(symbol) = Self::navigation_symbol(&index, &params) {
             symbol
         } else {
@@ -462,6 +495,41 @@ impl Backend {
             };
         }
         location(&index, &symbol).map(GotoDefinitionResponse::Scalar)
+    }
+
+    pub(super) async fn navigation_references(
+        &self,
+        params: TextDocumentPositionParams,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let index = self.navigation_index(&params.text_document.uri, true).await;
+        let symbol = Self::navigation_symbol(&index, &params)?;
+        let mut locations = Vec::new();
+        for (uri, document) in &index {
+            for occurrence in &document.occurrences {
+                if (!occurrence.declaration || include_declaration)
+                    && occurrence_symbol(&index, uri, occurrence).as_ref() == Some(&symbol)
+                    && let Some(location) = location(
+                        &index,
+                        &Symbol {
+                            uri: uri.clone(),
+                            start: occurrence.span.start(),
+                            end: occurrence.span.end(),
+                        },
+                    )
+                {
+                    locations.push(location);
+                }
+            }
+        }
+        locations.sort_by(|a, b| {
+            a.uri
+                .as_str()
+                .cmp(b.uri.as_str())
+                .then(a.range.start.cmp(&b.range.start))
+        });
+        locations.dedup();
+        Some(locations)
     }
 }
 
