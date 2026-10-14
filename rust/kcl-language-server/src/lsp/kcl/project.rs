@@ -36,61 +36,6 @@ pub(super) fn normalize(path: &Path) -> PathBuf {
 }
 
 impl Backend {
-    async fn document_imports(&self, document: &Url, dependency: &Url) -> bool {
-        let mut pending = vec![document.clone()];
-        let mut visited = std::collections::HashSet::new();
-        while let Some(uri) = pending.pop() {
-            if !visited.insert(uri.clone()) {
-                continue;
-            }
-            let source = if let Some(contents) = self
-                .code_map
-                .get(uri.as_str())
-                .filter(|_| self.open_documents.contains_key(uri.as_str()))
-            {
-                String::from_utf8(contents.clone()).ok()
-            } else if let Ok(path) = uri.to_file_path() {
-                self.fs
-                    .read_to_string(&TypedPath::new(&path.to_string_lossy()), Default::default())
-                    .await
-                    .ok()
-            } else {
-                None
-            };
-            let Some(source) = source else {
-                continue;
-            };
-            let Ok((Some(program), issues)) = Program::parse(&source) else {
-                continue;
-            };
-            if issues.iter().any(|issue| issue.is_err()) {
-                continue;
-            }
-            let imports = std::cell::RefCell::new(Vec::new());
-            let _ = crate::walk::walk(&program.ast, |node| {
-                if let crate::walk::Node::ImportStatement(import) = node
-                    && let crate::parsing::ast::types::ImportPath::Kcl { filename } = &import.path
-                    && let Ok(target) = uri.join(
-                        &filename
-                            .to_string()
-                            .replace('%', "%25")
-                            .replace('#', "%23")
-                            .replace('?', "%3F"),
-                    )
-                {
-                    imports.borrow_mut().push(target);
-                }
-                Ok::<_, anyhow::Error>(true)
-            });
-            let imports = imports.into_inner();
-            if imports.contains(dependency) {
-                return true;
-            }
-            pending.extend(imports);
-        }
-        false
-    }
-
     pub(super) async fn execute_project_document(
         &self,
         ast: &Program,
@@ -314,5 +259,29 @@ mod tests {
                 .iter()
                 .any(|item| item.severity == Some(DiagnosticSeverity::ERROR))
         }));
+    }
+    #[tokio::test]
+    async fn project_definition_follows_unsaved_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let dims = dir.path().join("dimensions with spaces.kcl");
+        std::fs::write(&dims, "export width = 7\n").unwrap();
+        let server = crate::lsp::test_util::kcl_lsp_server_mock_execution().await.unwrap();
+        let source = "import width as w from \"dimensions with spaces.kcl\"\na = w\n";
+        let uri = open(&server, &dir.path().join("main.kcl"), source).await;
+        let params = TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position::new(1, 4),
+        };
+        let Some(GotoDefinitionResponse::Scalar(definition)) = server.navigation_definition(params.clone()).await
+        else {
+            panic!("missing imported definition");
+        };
+        assert_eq!(definition.uri, Url::from_file_path(&dims).unwrap());
+        assert_eq!(definition.range.start, Position::new(0, 7));
+        open(&server, &dims, "// unsaved header\nexport width = 8\n").await;
+        let Some(GotoDefinitionResponse::Scalar(definition)) = server.navigation_definition(params).await else {
+            panic!("missing unsaved definition");
+        };
+        assert_eq!(definition.range.start, Position::new(1, 7));
     }
 }

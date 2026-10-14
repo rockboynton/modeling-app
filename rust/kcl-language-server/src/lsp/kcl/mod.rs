@@ -126,6 +126,7 @@ use crate::parsing::token::adapter;
 
 pub mod custom_notifications;
 mod hover;
+mod navigation;
 #[cfg(not(target_arch = "wasm32"))]
 mod project;
 
@@ -1050,6 +1051,7 @@ impl LanguageServer for Backend {
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
+                definition_provider: Some(OneOf::Left(true)),
                 color_provider: Some(ColorProviderCapability::Simple(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
                     code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
@@ -1211,6 +1213,13 @@ impl LanguageServer for Backend {
         self.do_did_close(params).await;
         #[cfg(not(target_arch = "wasm32"))]
         self.refresh_project_documents(&uri).await;
+    }
+
+    async fn goto_definition(
+        &self,
+        params: tower_lsp::lsp_types::GotoDefinitionParams,
+    ) -> RpcResult<Option<tower_lsp::lsp_types::GotoDefinitionResponse>> {
+        Ok(self.navigation_definition(params.text_document_position_params).await)
     }
 
     async fn hover(&self, params: HoverParams) -> RpcResult<Option<LspHover>> {
