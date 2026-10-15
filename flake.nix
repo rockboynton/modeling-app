@@ -16,7 +16,7 @@
     overlays = [
       (import rust-overlay)
       (self: super: {
-        rustToolchain = super.rust-bin.stable."1.96.0".default.override {
+        rustToolchain = (super.rust-bin.fromRustupToolchainFile ./rust/rust-toolchain.toml).override {
           targets = ["wasm32-unknown-unknown"];
           extensions = [
             "rustfmt"
@@ -123,10 +123,18 @@
           cargoBuildFlags = [
             "-p"
             "kcl-language-server"
+            "--bin"
+            "kcl-language-server"
           ];
           doCheck = false;
-          nativeBuildInputs = [pkgs.pkg-config];
+          nativeBuildInputs = [pkgs.pkg-config pkgs.cmake pkgs.perl];
           buildInputs = [pkgs.openssl];
+          meta = {
+            description = "Language server for Zoo's KCL modeling language";
+            homepage = "https://github.com/KittyCAD/modeling-app";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "kcl-language-server";
+          };
         };
         default = self.packages.${system}.kcl-language-server;
       }
