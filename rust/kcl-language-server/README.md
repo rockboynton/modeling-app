@@ -103,6 +103,12 @@ statically resolved calls; dynamic function-value flows are not resolved.
 Workspace rename requires readable, parseable
 KCL files. Implicit module names require an explicit import alias before renaming.
 
+Completion uses the same lexical scopes and import resolution. It offers visible
+parameters and local bindings, follows public module members and reexports,
+and reads unsaved imports. Member completion supports incomplete `module.` and
+`module::` expressions and replaces the full identifier at the cursor. Object
+field inference and automatic imports are not currently provided.
+
 The standalone native server checks each document with fresh mock execution,
 using its actual file path and nearest optional `project.toml`. Imports resolve
 from the entry point's directory and open imported buffers are read before disk.

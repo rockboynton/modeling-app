@@ -127,6 +127,7 @@ use crate::parsing::token::RESERVED_WORDS;
 use crate::parsing::token::TokenStream;
 use crate::parsing::token::adapter;
 
+mod completion;
 pub mod custom_notifications;
 mod hover;
 mod navigation;
@@ -1018,7 +1019,7 @@ impl LanguageServer for Backend {
                 })),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
-                    trigger_characters: Some(vec![".".to_string()]),
+                    trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
                     work_done_progress_options: Default::default(),
                     all_commit_characters: None,
                     ..Default::default()
@@ -1404,6 +1405,7 @@ impl LanguageServer for Backend {
         let Some(current_code) = self
             .code_map
             .get(params.text_document_position.text_document.uri.as_ref())
+            .map(|code| code.value().clone())
         else {
             return Ok(Some(CompletionResponse::Array(completions)));
         };
@@ -1423,6 +1425,42 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
+        let lexical = self
+            .lexical_completions(&params.text_document_position.text_document.uri, current_code, position)
+            .await;
+        if lexical.as_ref().is_some_and(|items| items.excluded) {
+            return Ok(None);
+        }
+        if let Some(items) = lexical.as_ref()
+            && let Some(namespace) = &items.namespace
+        {
+            let prefix = format!("{namespace}::");
+            let mut members = items.items.clone();
+            let names: std::collections::HashSet<_> = members.iter().map(|item| item.label.clone()).collect();
+            for item in self
+                .stdlib_completions
+                .values()
+                .filter(|item| item.label.starts_with(&prefix))
+            {
+                let mut item = item.clone();
+                item.label = item.label[prefix.len()..].to_owned();
+                if names.contains(&item.label) {
+                    continue;
+                }
+                let insert = item.insert_text.as_deref().unwrap_or(&item.label);
+                let insert = insert.strip_prefix(&prefix).unwrap_or(insert).to_owned();
+                item.insert_text = Some(insert.clone());
+                item.filter_text = Some(item.label.clone());
+                item.text_edit = Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(TextEdit {
+                    range: items.range,
+                    new_text: insert,
+                }));
+                members.push(item);
+            }
+            return Ok(Some(CompletionResponse::Array(members)));
+        }
+        let locals = lexical.map(|items| items.items).unwrap_or_default();
+
         // Add more to the completions if we have more.
         let Some(ast) = self
             .ast_map
@@ -1430,6 +1468,8 @@ impl LanguageServer for Backend {
         else {
             completions.extend(self.stdlib_completions.values().cloned());
             completions.extend(self.kcl_keywords.values().cloned());
+            completions.retain(|item| !locals.iter().any(|local| local.label == item.label));
+            completions.extend(locals);
             return Ok(Some(CompletionResponse::Array(completions)));
         };
 
@@ -1448,13 +1488,16 @@ impl LanguageServer for Backend {
             completions.extend(arg_label_completions);
         }
 
-        // Get the completion items for the ast.
-        let Ok(variables) = ast.ast.completion_items(position) else {
-            return Ok(Some(CompletionResponse::Array(completions)));
-        };
-
-        // Get our variables from our AST to include in our completions.
-        completions.extend(variables);
+        // Keep the settings snippet while using scoped bindings for names.
+        completions.extend(
+            ast.ast
+                .completion_items(position)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|item| item.label == "@settings"),
+        );
+        completions.retain(|item| !locals.iter().any(|local| local.label == item.label));
+        completions.extend(locals);
 
         Ok(Some(CompletionResponse::Array(completions)))
     }

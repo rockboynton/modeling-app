@@ -51,6 +51,7 @@ pub(super) struct Document {
     pub(super) import_links: Vec<(SourceRange, Url)>,
     pub(super) globs: Vec<(Url, SourceRange, bool)>,
     pub(super) functions: Vec<(SourceRange, SourceRange)>,
+    pub(super) types: Vec<SourceRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -140,6 +141,7 @@ impl Document {
         let globs = RefCell::new(Vec::new());
         let excluded = RefCell::new(Vec::new());
         let functions = RefCell::new(Vec::new());
+        let types = RefCell::new(Vec::new());
         let add = |name: String,
                    span: SourceRange,
                    scope: SourceRange,
@@ -185,6 +187,7 @@ impl Document {
                     add(value.name.clone(), span, scope(span), false, None, false);
                 }
                 Node::TypeDeclaration(value) => {
+                    types.borrow_mut().push(SourceRange::from(&value.name));
                     if let TypeDeclarationDefinition::Alias { ty } = &value.definition {
                         type_occurrences(ty, &occurrences);
                     }
@@ -368,10 +371,11 @@ impl Document {
             import_links: import_links.into_inner(),
             globs: globs.into_inner(),
             functions: functions.into_inner(),
+            types: types.into_inner(),
         })
     }
 
-    fn binding(&self, name: &str, offset: usize) -> Option<&Binding> {
+    pub(super) fn binding(&self, name: &str, offset: usize) -> Option<&Binding> {
         self.bindings
             .iter()
             .filter(|binding| binding.name == name && binding.scope.start() <= offset && offset <= binding.scope.end())
@@ -427,6 +431,28 @@ fn resolve(
     Some(first)
 }
 
+pub(super) fn namespace_target<'a>(index: &'a Index, uri: &Url, namespace: &str, offset: usize) -> Option<&'a Url> {
+    let mut names = namespace.split("::");
+    let binding = index.get(uri)?.binding(names.next()?, offset)?;
+    let (target, None) = binding.import.as_ref()? else {
+        return None;
+    };
+    let mut target = target;
+    for name in names {
+        let symbol = resolve(index, target, name, 0, true, true, &mut HashSet::new())?;
+        let binding = index
+            .get(&symbol.uri)?
+            .bindings
+            .iter()
+            .find(|binding| binding.span.start() == symbol.start && binding.span.end() == symbol.end)?;
+        let (next, None) = binding.import.as_ref()? else {
+            return None;
+        };
+        target = next;
+    }
+    Some(target)
+}
+
 fn occurrence_symbol(index: &Index, uri: &Url, occurrence: &Occurrence) -> Option<Symbol> {
     resolve_occurrence(index, uri, occurrence, true)
 }
@@ -473,24 +499,7 @@ pub(super) fn resolve_occurrence(
         return resolve(index, target, name, 0, true, follow_aliases, &mut HashSet::new());
     }
     if let Some(namespace) = &occurrence.qualifier {
-        let mut names = namespace.split("::");
-        let binding = index.get(uri)?.binding(names.next()?, occurrence.span.start())?;
-        let (target, None) = binding.import.as_ref()? else {
-            return None;
-        };
-        let mut target = target;
-        for name in names {
-            let symbol = resolve(index, target, name, 0, true, true, &mut HashSet::new())?;
-            let binding = index
-                .get(&symbol.uri)?
-                .bindings
-                .iter()
-                .find(|binding| binding.span.start() == symbol.start && binding.span.end() == symbol.end)?;
-            let (next, None) = binding.import.as_ref()? else {
-                return None;
-            };
-            target = next;
-        }
+        let target = namespace_target(index, uri, namespace, occurrence.span.start())?;
         return resolve(
             index,
             target,
@@ -548,6 +557,16 @@ impl Backend {
     }
 
     pub(super) async fn navigation_index_with_errors(&self, uri: &Url, workspace: bool) -> (Index, Vec<Url>) {
+        self.navigation_index_with_source(uri, workspace, None).await
+    }
+
+    pub(super) async fn navigation_index_with_source(
+        &self,
+        uri: &Url,
+        workspace: bool,
+        mut source_override: Option<String>,
+    ) -> (Index, Vec<Url>) {
+        let root = uri.clone();
         let mut failed = vec![];
         let mut pending = vec![uri.clone()];
         if workspace {
@@ -589,7 +608,9 @@ impl Backend {
             if !visited.insert(uri.clone()) {
                 continue;
             }
-            let source = if let Some(contents) = self
+            let source = if uri == root && source_override.is_some() {
+                source_override.take()
+            } else if let Some(contents) = self
                 .code_map
                 .get(uri.as_str())
                 .filter(|_| self.open_documents.contains_key(uri.as_str()) || uri.scheme() != "file")
