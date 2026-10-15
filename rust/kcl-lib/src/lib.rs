@@ -211,6 +211,8 @@ pub use kcl_error::SourceRange;
 pub use lsp_types::IntoDiagnostic;
 pub use lsp_types::LspSuggestion;
 pub use lsp_types::ToLspRange;
+pub use lsp_types::byte_to_lsp_position;
+pub use lsp_types::lsp_position_to_byte;
 pub use modules::ModuleId;
 pub use parsing::ast::types::FormatOptions;
 pub use parsing::ast::types::NodePath;

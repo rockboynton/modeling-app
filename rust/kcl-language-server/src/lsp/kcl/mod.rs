@@ -695,7 +695,6 @@ impl Backend {
             };
 
             let source_range: SourceRange = token.into();
-            let position = source_range.start_to_lsp_position(&params.text);
 
             // Calculate the token modifiers.
             // Get the value at the current position.
@@ -816,43 +815,20 @@ impl Backend {
                 _ => 0,
             };
 
-            // We need to check if we are on the last token of the line.
-            // If we are starting from the end of the last line just add 1 to the line.
-            // Check if we are on the last token of the line.
-            if let Some(line) = params.text.lines().nth(position.line as usize)
-                && line.len() == position.character as usize
-            {
-                // We are on the last token of the line.
-                // We need to add a new line.
-                let semantic_token = SemanticToken {
-                    delta_line: position.line - last_position.line + 1,
-                    delta_start: 0,
-                    length: (token.end - token.start) as u32,
+            for (position, length) in crate::lsp::util::semantic_token_spans(&params.text, token.start, token.end) {
+                semantic_tokens.push(SemanticToken {
+                    delta_line: position.line - last_position.line,
+                    delta_start: if position.line != last_position.line {
+                        position.character
+                    } else {
+                        position.character - last_position.character
+                    },
+                    length,
                     token_type: token_type_index,
                     token_modifiers_bitset,
-                };
-
-                semantic_tokens.push(semantic_token);
-
-                last_position = Position::new(position.line + 1, 0);
-                continue;
+                });
+                last_position = position;
             }
-
-            let semantic_token = SemanticToken {
-                delta_line: position.line - last_position.line,
-                delta_start: if position.line != last_position.line {
-                    position.character
-                } else {
-                    position.character - last_position.character
-                },
-                length: (token.end - token.start) as u32,
-                token_type: token_type_index,
-                token_modifiers_bitset,
-            };
-
-            semantic_tokens.push(semantic_token);
-
-            last_position = position;
         }
         self.semantic_tokens_map.insert(params.uri.to_string(), semantic_tokens);
     }
@@ -1030,7 +1006,9 @@ impl Backend {
         };
 
         // Let's convert the position to a character index.
-        let pos = position_to_char_index(params.position, current_code);
+        let Some(pos) = position_to_byte(params.position, current_code) else {
+            return Ok(None);
+        };
         // Now let's perform the rename on the ast.
         if !program.ast.rename_symbol(new_name, pos) {
             // Nothing was renamed, e.g. the position is on a symbol we can't
@@ -1253,7 +1231,9 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let pos = position_to_char_index(params.text_document_position_params.position, current_code);
+        let Some(pos) = position_to_byte(params.text_document_position_params.position, current_code) else {
+            return Ok(None);
+        };
 
         // Let's iterate over the AST and find the node that contains the cursor.
         let Some(ast) = self.ast_map.get(&filename) else {
@@ -1454,25 +1434,16 @@ impl LanguageServer for Backend {
             return Ok(Some(CompletionResponse::Array(completions)));
         };
 
-        // Get the current line up to cursor, with bounds checking
-        if let Some(line) = current_code
-            .lines()
-            .nth(params.text_document_position.position.line as usize)
-        {
-            let char_pos = params.text_document_position.position.character as usize;
-            if char_pos <= line.len() {
-                let line_prefix = &line[..char_pos];
-                // Get last word
-                let last_word = line_prefix
-                    .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-                    .next_back()
-                    .unwrap_or("");
-
-                // If the last word starts with a digit, return no completions
-                if !last_word.is_empty() && last_word.chars().next().unwrap().is_ascii_digit() {
-                    return Ok(None);
-                }
-            }
+        let Some(position) = position_to_byte(params.text_document_position.position, current_code) else {
+            return Ok(None);
+        };
+        let line_prefix = current_code[..position].rsplit(['\r', '\n']).next().unwrap_or_default();
+        let last_word = line_prefix
+            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+            .next_back()
+            .unwrap_or_default();
+        if last_word.starts_with(|c: char| c.is_ascii_digit()) {
+            return Ok(None);
         }
 
         // Add more to the completions if we have more.
@@ -1485,7 +1456,6 @@ impl LanguageServer for Backend {
             return Ok(Some(CompletionResponse::Array(completions)));
         };
 
-        let position = position_to_char_index(params.text_document_position.position, current_code);
         if ast.ast.in_comment(position) {
             // If we are in a code comment we don't want to show completions.
             return Ok(None);
@@ -1558,7 +1528,9 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let pos = position_to_char_index(params.text_document_position_params.position, current_code);
+        let Some(pos) = position_to_byte(params.text_document_position_params.position, current_code) else {
+            return Ok(None);
+        };
 
         let ast = self.ast_map.get(&filename);
         let stdlib_signatures = ast
@@ -1567,48 +1539,33 @@ impl LanguageServer for Backend {
             .unwrap_or(&self.stdlib_signatures);
 
         // Get the character at the position.
-        let Some(ch) = current_code.chars().nth(pos) else {
-            return Ok(None);
-        };
+        let ch = current_code[pos..]
+            .chars()
+            .next()
+            .or_else(|| current_code[..pos].chars().next_back())
+            .unwrap_or(' ');
 
         let check_char = |ch: char| {
-            // If  we are on a (, then get the string in front of the (
-            // and try to get the signature.
-            // We do these before the ast check because we might not have a valid ast.
-            if ch == '(' {
-                // If the current character is not a " " then get the next space after
-                // our position so we can split on that.
-                // Find the next space after the current position.
-                let next_space = if ch != ' ' {
-                    if let Some(next_space) = current_code[pos..].find(' ') {
-                        pos + next_space
-                    } else if let Some(next_space) = current_code[pos..].find('(') {
-                        pos + next_space
-                    } else {
-                        pos
-                    }
-                } else {
-                    pos
-                };
-                let p2 = std::cmp::max(pos, next_space);
-
-                let last_word = current_code[..p2].split_whitespace().last()?;
-
-                // Get the function name.
-                return stdlib_signatures.get(last_word);
-            } else if ch == ',' {
-                // If we have a comma, then get the string in front of
-                // the closest ( and try to get the signature.
-
-                // Find the last ( before the comma.
-                let last_paren = current_code[..pos].rfind('(')?;
-                // Get the string in front of the (.
-                let last_word = current_code[..last_paren].split_whitespace().last()?;
-                // Get the function name.
-                return stdlib_signatures.get(last_word);
+            if ch != '(' && ch != ',' {
+                return None;
             }
-
-            None
+            let ahead = current_code[pos..].find('(').filter(|offset| {
+                current_code[pos..pos + offset]
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+            });
+            let open = if ch == '('
+                && let Some(ahead) = ahead
+            {
+                pos + ahead
+            } else {
+                current_code[..pos].rfind('(')?
+            };
+            let name = current_code[..open]
+                .trim_end()
+                .rsplit(|c: char| !c.is_alphanumeric() && c != '_' && c != ':')
+                .next()?;
+            stdlib_signatures.get(name)
         };
 
         if let Some(signature) = check_char(ch) {
@@ -1764,7 +1721,9 @@ impl LanguageServer for Backend {
         else {
             return Ok(None);
         };
-        let offset = position_to_char_index(params.position, &code);
+        let Some(offset) = position_to_byte(params.position, &code) else {
+            return Ok(None);
+        };
         let Some(tokens) = self.token_map.get(params.text_document.uri.as_str()) else {
             return Ok(None);
         };
@@ -1906,8 +1865,12 @@ impl LanguageServer for Backend {
             return Ok(vec![]);
         };
 
-        let pos_start = position_to_char_index(params.range.start, current_code);
-        let pos_end = position_to_char_index(params.range.end, current_code);
+        let (Some(pos_start), Some(pos_end)) = (
+            position_to_byte(params.range.start, current_code),
+            position_to_byte(params.range.end, current_code),
+        ) else {
+            return Ok(vec![]);
+        };
 
         // Get the colors from the ast.
         let Ok(Some(presentation)) = ast.ast.color_presentation(&params.color, pos_start, pos_end) else {
@@ -2119,21 +2082,9 @@ fn get_arg_maps_from_stdlib_in_context(
     result
 }
 
-/// Convert a position to a character index from the start of the file.
-fn position_to_char_index(position: Position, code: &str) -> usize {
-    // Get the character position from the start of the file.
-    let mut char_position = 0;
-    for (index, line) in code.lines().enumerate() {
-        if index == position.line as usize {
-            char_position += position.character as usize;
-            break;
-        } else {
-            char_position += line.len() + 1;
-        }
-    }
-
-    let end_of_file = if code.is_empty() { 0 } else { code.len() - 1 };
-    std::cmp::min(char_position, end_of_file)
+/// Convert a UTF-16 LSP position to the byte offsets used by the AST.
+fn position_to_byte(position: Position, code: &str) -> Option<usize> {
+    kcl_lib::lsp_position_to_byte(code, position)
 }
 
 async fn with_cached_var<T>(backend: &Backend, name: &str, f: impl Fn(&KclValue) -> T) -> Option<T> {
@@ -2177,31 +2128,31 @@ mod tests {
     }
 
     #[test]
-    fn test_position_to_char_index_first_line() {
+    fn test_position_to_byte_first_line() {
         let code = r#"def foo():
 return 42"#;
         let position = Position::new(0, 3);
-        let index = position_to_char_index(position, code);
-        assert_eq!(index, 3);
+        let index = position_to_byte(position, code);
+        assert_eq!(index, Some(3));
     }
 
     #[test]
-    fn test_position_to_char_index() {
+    fn test_position_to_byte() {
         let code = r#"def foo():
 return 42"#;
         let position = Position::new(1, 4);
-        let index = position_to_char_index(position, code);
-        assert_eq!(index, 15);
+        let index = position_to_byte(position, code);
+        assert_eq!(index, Some(15));
     }
 
     #[test]
-    fn test_position_to_char_index_with_newline() {
+    fn test_position_to_byte_with_newline() {
         let code = r#"def foo():
 
 return 42"#;
         let position = Position::new(2, 0);
-        let index = position_to_char_index(position, code);
-        assert_eq!(index, 12);
+        let index = position_to_byte(position, code);
+        assert_eq!(index, Some(12));
     }
 
     #[test]
@@ -2210,16 +2161,16 @@ return 42"#;
 return 42"#;
 
         let position = Position::new(1, 8);
-        let index = position_to_char_index(position, code);
-        assert_eq!(index, 19);
+        let index = position_to_byte(position, code);
+        assert_eq!(index, Some(19));
     }
 
     #[test]
     fn test_position_to_char_empty() {
         let code = r#""#;
         let position = Position::new(0, 0);
-        let index = position_to_char_index(position, code);
-        assert_eq!(index, 0);
+        let index = position_to_byte(position, code);
+        assert_eq!(index, Some(0));
     }
 
     #[test]

@@ -72,37 +72,97 @@ pub trait ToLspRange {
     fn end_to_lsp_position(&self, code: &str) -> Position;
 }
 
+// Exclude line terminators while preserving an empty final line. CRLF is one
+// line break; LSP also accepts lone CR and LF.
+fn source_lines(source: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        let tail = source.get(start..)?;
+        let end = start + tail.find(['\r', '\n']).unwrap_or(tail.len());
+        let line = (start, end);
+        start = if source.as_bytes().get(end..end + 2) == Some(b"\r\n") {
+            end + 2
+        } else {
+            end + 1
+        };
+        Some(line)
+    })
+}
+
+/// Convert an LSP UTF-16 position into a UTF-8 source offset.
+///
+/// Columns beyond the line end are clamped as required by LSP. Positions in the
+/// middle of a surrogate pair or outside the document return `None`.
+pub fn lsp_position_to_byte(source: &str, position: Position) -> Option<usize> {
+    let (start, end) = source_lines(source).nth(position.line as usize)?;
+    let mut units = 0;
+    for (byte, ch) in source[start..end].char_indices() {
+        if units == position.character {
+            return Some(start + byte);
+        }
+        units += ch.len_utf16() as u32;
+        if units > position.character {
+            return None;
+        }
+    }
+    Some(end)
+}
+
+/// Convert a UTF-8 source offset into an LSP UTF-16 position.
+/// Invalid UTF-8 boundaries and offsets within a CRLF terminator return `None`.
+pub fn byte_to_lsp_position(source: &str, offset: usize) -> Option<Position> {
+    source.get(..offset)?;
+    for (line, (start, end)) in source_lines(source).enumerate() {
+        if start <= offset && offset <= end {
+            return Some(Position::new(
+                line as u32,
+                source[start..offset].encode_utf16().count() as u32,
+            ));
+        }
+    }
+    None
+}
+
 impl ToLspRange for crate::SourceRange {
     fn start_to_lsp_position(&self, code: &str) -> Position {
-        // Calculate the line and column of the error from the source range.
-        // Lines are zero indexed in vscode so we need to subtract 1.
-        let code_slice = code.get(..self.start()).unwrap_or_default();
-        let mut line = code_slice.lines().count();
-        if line > 0 {
-            line = line.saturating_sub(1);
-        }
-        let column = code_slice.lines().last().map(|l| l.len()).unwrap_or_default();
-
-        Position {
-            line: line as u32,
-            character: column as u32,
-        }
+        byte_to_lsp_position(code, self.start()).unwrap_or_default()
     }
 
     fn end_to_lsp_position(&self, code: &str) -> Position {
-        let lines = code.get(..self.end()).unwrap_or_default().lines();
-        if lines.clone().count() == 0 {
-            return Position { line: 0, character: 0 };
-        }
+        byte_to_lsp_position(code, self.end()).unwrap_or_default()
+    }
+}
 
-        // Calculate the line and column of the error from the source range.
-        // Lines are zero indexed in vscode so we need to subtract 1.
-        let line = lines.clone().count() - 1;
-        let column = lines.last().map(|l| l.len()).unwrap_or_default();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        Position {
-            line: line as u32,
-            character: column as u32,
+    #[test]
+    fn lsp_positions_round_trip_unicode_and_line_endings() {
+        for source in ["", "aé😀z", "aé😀\r\nb\rç\n", "\n", "\r\n"] {
+            for offset in 0..=source.len() {
+                if let Some(position) = byte_to_lsp_position(source, offset) {
+                    assert_eq!(
+                        lsp_position_to_byte(source, position),
+                        Some(offset),
+                        "{source:?} at {offset}"
+                    );
+                }
+            }
         }
+        assert_eq!(byte_to_lsp_position("é😀x", 6), Some(Position::new(0, 3)));
+        assert_eq!(lsp_position_to_byte("é😀x", Position::new(0, 2)), None);
+        assert_eq!(lsp_position_to_byte("é😀x", Position::new(0, 99)), Some(7));
+        assert_eq!(lsp_position_to_byte("x", Position::new(1, 0)), None);
+    }
+
+    #[test]
+    fn lsp_source_ranges_preserve_line_starts_and_eof() {
+        let source = "é😀\r\nwidth\n";
+        let start = source.find("width").unwrap();
+        assert_eq!(
+            crate::SourceRange::new(start, source.len(), Default::default()).to_lsp_range(source),
+            Range::new(Position::new(1, 0), Position::new(2, 0))
+        );
     }
 }

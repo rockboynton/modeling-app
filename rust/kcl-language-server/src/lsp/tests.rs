@@ -4750,3 +4750,118 @@ async fn advertised_capabilities_enable_document_symbols_and_save_notifications(
     assert!(symbols.iter().any(|symbol| symbol.name == "width"));
     assert!(symbols.iter().any(|symbol| symbol.name == "height"));
 }
+
+#[tokio::test]
+async fn unicode_editor_requests_use_utf16_positions() {
+    use tower_lsp::lsp_types::*;
+    let server = kcl_lsp_server(false).await.unwrap();
+    let uri: Url = "file:///unicode.kcl".parse().unwrap();
+    let line = "values = [\"\u{1f600}\", extrude(length = 2mm)]";
+    let source = format!("@settings(kclVersion = 3.0)\r\n// é\r\n{line}\r\n");
+    server
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "kcl".into(),
+                version: 1,
+                text: source.clone(),
+            },
+        })
+        .await;
+    let document = TextDocumentIdentifier { uri };
+    let position = |offset| kcl_lib::byte_to_lsp_position(&source, offset).unwrap();
+    let call = source.find("extrude").unwrap();
+    let hover = server
+        .hover(HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: document.clone(),
+                position: position(call + 2),
+            },
+            work_done_progress_params: Default::default(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        hover.range.unwrap(),
+        Range::new(position(call), position(call + "extrude".len()))
+    );
+
+    // A cursor inside a UTF-16 surrogate pair must not become an invalid UTF-8 slice.
+    let emoji = position(source.find('\u{1f600}').unwrap());
+    let completion = server
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: document.clone(),
+                position: Position::new(emoji.line, emoji.character + 1),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+    assert!(completion.is_none());
+
+    let signature = server
+        .signature_help(SignatureHelpParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: document.clone(),
+                position: position(call + "extrude(".len()),
+            },
+            work_done_progress_params: Default::default(),
+            context: Some(SignatureHelpContext {
+                trigger_kind: SignatureHelpTriggerKind::TRIGGER_CHARACTER,
+                trigger_character: Some("(".into()),
+                is_retrigger: false,
+                active_signature_help: None,
+            }),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(signature.signatures[0].label.starts_with("extrude"));
+
+    let symbols = server
+        .document_symbol(DocumentSymbolParams {
+            text_document: document.clone(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let DocumentSymbolResponse::Nested(symbols) = symbols else {
+        panic!("expected document symbols");
+    };
+    assert_eq!(symbols[0].range.start, Position::new(2, 0));
+
+    let SemanticTokensResult::Tokens(tokens) = server
+        .semantic_tokens_full(SemanticTokensParams {
+            text_document: document,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected semantic tokens");
+    };
+    let string_position = position(source.find('"').unwrap());
+    let mut token_position = Position::new(0, 0);
+    let mut found_string = false;
+    for token in tokens.data {
+        token_position.line += token.delta_line;
+        token_position.character = if token.delta_line == 0 {
+            token_position.character + token.delta_start
+        } else {
+            token.delta_start
+        };
+        if token_position == string_position {
+            assert_eq!(token.length, 4);
+            found_string = true;
+        }
+    }
+    assert!(found_string);
+}

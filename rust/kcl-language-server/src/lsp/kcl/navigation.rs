@@ -333,29 +333,12 @@ fn occurrence_symbol(index: &Index, uri: &Url, occurrence: &Occurrence) -> Optio
     )
 }
 
-// LSP columns are UTF-16 code units; AST spans are UTF-8 byte offsets.
 fn byte_offset(source: &str, position: Position) -> Option<usize> {
-    let mut start = 0;
-    for _ in 0..position.line {
-        start += source.get(start..)?.find('\n')? + 1;
-    }
-    let line = source.get(start..)?.split('\n').next()?;
-    let mut units = 0;
-    for (byte, ch) in line.char_indices() {
-        if units == position.character {
-            return Some(start + byte);
-        }
-        units += ch.len_utf16() as u32;
-    }
-    (units == position.character).then_some(start + line.len())
+    kcl_lib::lsp_position_to_byte(source, position)
 }
 
 fn position(source: &str, offset: usize) -> Option<Position> {
-    let prefix = source.get(..offset)?;
-    Some(Position::new(
-        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
-        prefix.rsplit('\n').next()?.encode_utf16().count() as u32,
-    ))
+    kcl_lib::byte_to_lsp_position(source, offset)
 }
 
 fn location(index: &Index, symbol: &Symbol) -> Option<Location> {
