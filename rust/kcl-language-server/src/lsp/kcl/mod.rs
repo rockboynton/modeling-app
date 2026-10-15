@@ -132,6 +132,7 @@ mod hover;
 mod navigation;
 #[cfg(not(target_arch = "wasm32"))]
 mod project;
+mod rename;
 
 const SEMANTIC_TOKEN_TYPES: [SemanticTokenType; 10] = [
     SemanticTokenType::NUMBER,
@@ -197,7 +198,9 @@ pub struct Backend {
     /// Current code.
     pub code_map: DashMap<String, Vec<u8>>,
     /// Documents whose contents are owned by the editor rather than disk.
-    pub open_documents: DashMap<String, ()>,
+    pub open_documents: DashMap<String, i32>,
+    /// Whether the client accepts versioned workspace edits.
+    pub(super) supports_document_changes: Arc<std::sync::atomic::AtomicBool>,
     /// Diagnostics.
     pub diagnostics_map: DashMap<String, Vec<Diagnostic>>,
     /// Symbols map.
@@ -279,6 +282,7 @@ impl Backend {
             code_map: Default::default(),
             diagnostics_map: Default::default(),
             open_documents: Default::default(),
+            supports_document_changes: Default::default(),
             symbols_map: Default::default(),
             semantic_tokens_map: Default::default(),
             is_initialized: Default::default(),
@@ -981,46 +985,6 @@ impl Backend {
 
         Ok(custom_notifications::UpdateCanExecuteResponse {})
     }
-
-    /// Returns the new string for the code after rename.
-    pub fn inner_prepare_rename(
-        &self,
-        params: &TextDocumentPositionParams,
-        new_name: &str,
-    ) -> RpcResult<Option<(String, String)>> {
-        let filename = params.text_document.uri.to_string();
-
-        let Some(current_code) = self.code_map.get(&filename) else {
-            return Ok(None);
-        };
-        let Ok(current_code) = std::str::from_utf8(&current_code) else {
-            return Ok(None);
-        };
-
-        // Parse the ast.
-        // I don't know if we need to do this again since it should be updated in the context.
-        // But I figure better safe than sorry since this will write back out to the file.
-        let module_id = ModuleId::default();
-        let Ok(mut program) = crate::parsing::parse_str(current_code, module_id).parse_errs_as_err() else {
-            return Ok(None);
-        };
-
-        // Let's convert the position to a character index.
-        let Some(pos) = position_to_byte(params.position, current_code) else {
-            return Ok(None);
-        };
-        // Now let's perform the rename on the ast.
-        if !program.ast.rename_symbol(new_name, pos) {
-            // Nothing was renamed, e.g. the position is on a symbol we can't
-            // rename yet, like a local in a function body or an if-expression
-            // arm. Refuse instead of producing an edit that only reformats.
-            return Ok(None);
-        }
-        // Now recast it.
-        let recast = program.ast.recast_top(&Default::default(), 0);
-
-        Ok(Some((current_code.to_string(), recast)))
-    }
 }
 
 #[tower_lsp::async_trait]
@@ -1030,6 +994,16 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, format!("initialize: {params:?}"))
             .await;
 
+        self.supports_document_changes.store(
+            params
+                .capabilities
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.workspace_edit.as_ref())
+                .and_then(|edit| edit.document_changes)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.add_workspace_folders(params.workspace_folders.unwrap_or_default())
             .await;
         Ok(InitializeResult {
@@ -1143,7 +1117,8 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.open_documents.insert(params.text_document.uri.to_string(), ());
+        self.open_documents
+            .insert(params.text_document.uri.to_string(), params.text_document.version);
         #[cfg(not(target_arch = "wasm32"))]
         let uri = params.text_document.uri.clone();
         self.do_did_open(params).await;
@@ -1152,6 +1127,8 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        self.open_documents
+            .insert(params.text_document.uri.to_string(), params.text_document.version);
         #[cfg(not(target_arch = "wasm32"))]
         let uri = params.text_document.uri.clone();
         self.do_did_change(params).await;
@@ -1694,56 +1671,12 @@ impl LanguageServer for Backend {
     }
 
     async fn rename(&self, params: RenameParams) -> RpcResult<Option<WorkspaceEdit>> {
-        let Some((current_code, new_code)) =
-            self.inner_prepare_rename(&params.text_document_position, &params.new_name)?
-        else {
-            return Ok(None);
-        };
-
-        let source_range = SourceRange::new(0, current_code.len(), ModuleId::default());
-        let range = source_range.to_lsp_range(&current_code);
-        Ok(Some(WorkspaceEdit {
-            changes: Some(HashMap::from([(
-                params.text_document_position.text_document.uri,
-                vec![TextEdit {
-                    new_text: new_code,
-                    range,
-                }],
-            )])),
-            document_changes: None,
-            change_annotations: None,
-        }))
+        self.lexical_rename(params.text_document_position, &params.new_name)
+            .await
     }
 
     async fn prepare_rename(&self, params: TextDocumentPositionParams) -> RpcResult<Option<PrepareRenameResponse>> {
-        let Some((code, _)) =
-            self.inner_prepare_rename(&params, "someNameNoOneInTheirRightMindWouldEverUseForTesting")?
-        else {
-            return Ok(None);
-        };
-        let Some(offset) = position_to_byte(params.position, &code) else {
-            return Ok(None);
-        };
-        let Some(tokens) = self.token_map.get(params.text_document.uri.as_str()) else {
-            return Ok(None);
-        };
-        let range = tokens
-            .as_slice()
-            .iter()
-            .find(|token| {
-                token.token_type == crate::parsing::token::TokenType::Word
-                    && token.start <= offset
-                    && offset <= token.end
-            })
-            .and_then(|token| {
-                Some(tower_lsp::lsp_types::Range::new(
-                    crate::lsp::util::byte_to_position(&code, token.start)?,
-                    crate::lsp::util::byte_to_position(&code, token.end)?,
-                ))
-            });
-        // A concrete range works even when the client does not support the
-        // optional prepareSupportDefaultBehavior capability.
-        Ok(range.map(PrepareRenameResponse::Range))
+        Ok(self.lexical_prepare_rename(params).await)
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> RpcResult<Option<Vec<FoldingRange>>> {

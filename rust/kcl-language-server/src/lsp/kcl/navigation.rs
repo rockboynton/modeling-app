@@ -17,44 +17,98 @@ use crate::parsing::ast::types::Expr;
 use crate::parsing::ast::types::ImportPath;
 use crate::parsing::ast::types::ImportSelector;
 use crate::parsing::ast::types::ItemVisibility;
+use crate::parsing::ast::types::Name;
+use crate::parsing::ast::types::PrimitiveType;
+use crate::parsing::ast::types::Type;
+use crate::parsing::ast::types::TypeDeclarationDefinition;
 use crate::walk::Node;
 
 #[derive(Clone)]
-struct Binding {
-    name: String,
-    span: SourceRange,
-    scope: SourceRange,
-    exported: bool,
-    import: Option<(Url, Option<String>)>,
+pub(super) struct Binding {
+    pub(super) name: String,
+    pub(super) span: SourceRange,
+    pub(super) scope: SourceRange,
+    pub(super) exported: bool,
+    pub(super) import: Option<(Url, Option<String>)>,
+    pub(super) alias: bool,
 }
 
-struct Occurrence {
-    name: String,
-    qualifier: Option<String>,
-    span: SourceRange,
-    declaration: bool,
+pub(super) struct Occurrence {
+    pub(super) name: String,
+    pub(super) qualifier: Option<String>,
+    pub(super) span: SourceRange,
+    pub(super) declaration: bool,
+    pub(super) import_name: bool,
+    pub(super) callee: Option<(String, Option<String>)>,
+    pub(super) type_context: bool,
 }
 
-struct Document {
-    source: String,
-    bindings: Vec<Binding>,
-    occurrences: Vec<Occurrence>,
-    imports: Vec<Url>,
-    import_links: Vec<(SourceRange, Url)>,
-    globs: Vec<(Url, SourceRange, bool)>,
+pub(super) struct Document {
+    pub(super) source: String,
+    pub(super) bindings: Vec<Binding>,
+    pub(super) occurrences: Vec<Occurrence>,
+    pub(super) imports: Vec<Url>,
+    pub(super) import_links: Vec<(SourceRange, Url)>,
+    pub(super) globs: Vec<(Url, SourceRange, bool)>,
+    pub(super) functions: Vec<(SourceRange, SourceRange)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Symbol {
-    uri: Url,
-    start: usize,
-    end: usize,
+pub(super) struct Symbol {
+    pub(super) uri: Url,
+    pub(super) start: usize,
+    pub(super) end: usize,
 }
 
-type Index = BTreeMap<Url, Document>;
+pub(super) type Index = BTreeMap<Url, Document>;
+
+fn name_occurrences(value: &Name, occurrences: &RefCell<Vec<Occurrence>>, type_context: bool) {
+    if value.abs_path {
+        return;
+    }
+    let mut path = vec![];
+    for name in value.path.iter().chain(std::iter::once(&value.name)) {
+        occurrences.borrow_mut().push(Occurrence {
+            name: name.name.clone(),
+            qualifier: (!path.is_empty()).then(|| path.join("::")),
+            span: SourceRange::from(name),
+            declaration: false,
+            import_name: false,
+            callee: None,
+            type_context,
+        });
+        path.push(name.name.clone());
+    }
+}
+
+fn type_occurrences(ty: &Type, occurrences: &RefCell<Vec<Occurrence>>) {
+    match ty {
+        Type::Named { name } => name_occurrences(name, occurrences, true),
+        Type::Array { ty, .. } => type_occurrences(ty, occurrences),
+        Type::Union { tys } => {
+            for ty in tys {
+                type_occurrences(ty, occurrences);
+            }
+        }
+        Type::Object { properties } => {
+            for (_, ty) in properties {
+                type_occurrences(ty, occurrences);
+            }
+        }
+        Type::Primitive(PrimitiveType::Function(function)) => {
+            for ty in function.unnamed_arg.iter().chain(function.return_type.iter()) {
+                type_occurrences(ty, occurrences);
+            }
+            for (_, ty) in &function.named_args {
+                type_occurrences(ty, occurrences);
+            }
+        }
+        Type::Primitive(_) => {}
+    }
+}
 
 impl Document {
-    fn parse(uri: &Url, source: String) -> Option<Self> {
+    pub(super) fn parse(uri: &Url, source: String) -> Option<Self> {
         let (program, issues) = Program::parse(&source).ok()?;
         if issues.iter().any(|issue| issue.is_err()) {
             return None;
@@ -85,16 +139,21 @@ impl Document {
         let import_links = RefCell::new(Vec::new());
         let globs = RefCell::new(Vec::new());
         let excluded = RefCell::new(Vec::new());
+        let functions = RefCell::new(Vec::new());
         let add = |name: String,
                    span: SourceRange,
                    scope: SourceRange,
                    exported: bool,
-                   import: Option<(Url, Option<String>)>| {
+                   import: Option<(Url, Option<String>)>,
+                   alias: bool| {
             occurrences.borrow_mut().push(Occurrence {
                 name: name.clone(),
                 qualifier: None,
                 span,
                 declaration: import.is_none(),
+                import_name: false,
+                callee: None,
+                type_context: false,
             });
             bindings.borrow_mut().push(Binding {
                 name,
@@ -102,25 +161,45 @@ impl Document {
                 scope,
                 exported,
                 import,
+                alias,
             });
         };
         crate::walk::walk(&program.ast, |node| {
             match node {
                 Node::VariableDeclaration(value) => {
                     let span = SourceRange::from(&value.declaration.id);
+                    if let Expr::FunctionExpression(function) = &value.declaration.init {
+                        functions.borrow_mut().push((span, SourceRange::from(function)));
+                    }
                     add(
                         value.declaration.id.name.clone(),
                         span,
                         scope(span),
                         value.visibility == ItemVisibility::Export,
                         None,
+                        false,
                     );
                 }
                 Node::TagDeclarator(value) => {
                     let span = SourceRange::from(value);
-                    add(value.name.clone(), span, scope(span), false, None);
+                    add(value.name.clone(), span, scope(span), false, None, false);
                 }
                 Node::TypeDeclaration(value) => {
+                    if let TypeDeclarationDefinition::Alias { ty } = &value.definition {
+                        type_occurrences(ty, &occurrences);
+                    }
+                    if let Some(args) = &value.args {
+                        for arg in args {
+                            add(
+                                arg.name.clone(),
+                                SourceRange::from(arg),
+                                SourceRange::from(value),
+                                false,
+                                None,
+                                false,
+                            );
+                        }
+                    }
                     let span = SourceRange::from(&value.name);
                     add(
                         value.name.name.clone(),
@@ -128,9 +207,13 @@ impl Document {
                         scope(span),
                         value.visibility == ItemVisibility::Export,
                         None,
+                        false,
                     );
                 }
                 Node::FunctionExpression(value) => {
+                    if let Some(ty) = &value.return_type {
+                        type_occurrences(ty, &occurrences);
+                    }
                     for param in &value.params {
                         add(
                             param.identifier.name.clone(),
@@ -138,6 +221,7 @@ impl Document {
                             SourceRange::from(value),
                             false,
                             None,
+                            false,
                         );
                     }
                 }
@@ -170,6 +254,7 @@ impl Document {
                                     scope(span),
                                     exported,
                                     Some((target.clone(), Some(item.name.name.clone()))),
+                                    item.alias.is_some(),
                                 );
                                 if item.alias.is_some() {
                                     occurrences.borrow_mut().push(Occurrence {
@@ -177,6 +262,9 @@ impl Document {
                                         qualifier: None,
                                         span: SourceRange::from(&item.name),
                                         declaration: false,
+                                        import_name: true,
+                                        callee: None,
+                                        type_context: false,
                                     });
                                 }
                             }
@@ -195,7 +283,7 @@ impl Document {
                                 .as_ref()
                                 .map(SourceRange::from)
                                 .unwrap_or_else(|| SourceRange::from(value));
-                            add(name, span, scope(span), exported, Some((target, None)));
+                            add(name, span, scope(span), exported, Some((target, None)), alias.is_some());
                         }
                         ImportSelector::Glob(_) => {
                             globs
@@ -204,38 +292,58 @@ impl Document {
                         }
                     }
                 }
-                Node::Name(value) => {
-                    if value.abs_path {
-                        return Ok(true);
+                Node::Name(value) => name_occurrences(value, &occurrences, false),
+                Node::Parameter(value) => {
+                    if let Some(ty) = &value.param_type {
+                        type_occurrences(ty, &occurrences);
                     }
-                    if value.path.len() > 1 {
-                        return Ok(true);
+                }
+                Node::AscribedExpression(value) => type_occurrences(&value.ty, &occurrences),
+                Node::CallExpressionKw(value) if !value.callee.abs_path => {
+                    for arg in &value.arguments {
+                        if let Some(label) = &arg.label {
+                            occurrences.borrow_mut().push(Occurrence {
+                                name: label.name.clone(),
+                                qualifier: None,
+                                span: SourceRange::from(label),
+                                declaration: false,
+                                import_name: false,
+                                type_context: false,
+                                callee: Some((
+                                    value.callee.name.name.clone(),
+                                    (!value.callee.path.is_empty()).then(|| {
+                                        value
+                                            .callee
+                                            .path
+                                            .iter()
+                                            .map(|name| name.name.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("::")
+                                    }),
+                                )),
+                            });
+                        }
                     }
-                    if let Some(namespace) = value.path.first() {
-                        occurrences.borrow_mut().push(Occurrence {
-                            name: namespace.name.clone(),
-                            qualifier: None,
-                            span: SourceRange::from(namespace),
-                            declaration: false,
-                        });
-                    }
-                    occurrences.borrow_mut().push(Occurrence {
-                        name: value.name.name.clone(),
-                        qualifier: value.path.first().map(|id| id.name.clone()),
-                        span: SourceRange::from(&value.name),
-                        declaration: false,
-                    });
                 }
                 Node::MemberExpression(value) if !value.computed => {
                     excluded.borrow_mut().push(SourceRange::from(&value.property));
-                    if let (Expr::Name(object), Expr::Name(property)) = (&value.object, &value.property)
-                        && object.path.is_empty()
-                    {
+                    if let (Expr::Name(object), Expr::Name(property)) = (&value.object, &value.property) {
                         occurrences.borrow_mut().push(Occurrence {
                             name: property.name.name.clone(),
-                            qualifier: Some(object.name.name.clone()),
+                            qualifier: Some(
+                                object
+                                    .path
+                                    .iter()
+                                    .chain(std::iter::once(&object.name))
+                                    .map(|name| name.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("::"),
+                            ),
                             span: SourceRange::from(&property.name),
                             declaration: false,
+                            import_name: false,
+                            callee: None,
+                            type_context: false,
                         });
                     }
                 }
@@ -259,6 +367,7 @@ impl Document {
             imports: imports.into_inner(),
             import_links: import_links.into_inner(),
             globs: globs.into_inner(),
+            functions: functions.into_inner(),
         })
     }
 
@@ -276,6 +385,7 @@ fn resolve(
     name: &str,
     offset: usize,
     exported: bool,
+    follow_aliases: bool,
     visited: &mut HashSet<(Url, String)>,
 ) -> Option<Symbol> {
     if !visited.insert((uri.clone(), name.to_owned())) {
@@ -291,8 +401,10 @@ fn resolve(
         document.binding(name, offset)
     };
     if let Some(binding) = binding {
-        if let Some((target, Some(name))) = &binding.import {
-            return resolve(index, target, name, 0, true, visited);
+        if let Some((target, Some(name))) = &binding.import
+            && (follow_aliases || !binding.alias)
+        {
+            return resolve(index, target, name, 0, true, follow_aliases, visited);
         }
         return Some(Symbol {
             uri: uri.clone(),
@@ -307,7 +419,7 @@ fn resolve(
         .filter(|(_, scope, public)| {
             (!exported || *public) && (exported || (scope.start() <= offset && offset <= scope.end()))
         })
-        .filter_map(|(target, _, _)| resolve(index, target, name, 0, true, &mut visited.clone()));
+        .filter_map(|(target, _, _)| resolve(index, target, name, 0, true, follow_aliases, &mut visited.clone()));
     let first = candidates.next()?;
     if candidates.any(|candidate| candidate != first) {
         return None;
@@ -316,19 +428,87 @@ fn resolve(
 }
 
 fn occurrence_symbol(index: &Index, uri: &Url, occurrence: &Occurrence) -> Option<Symbol> {
+    resolve_occurrence(index, uri, occurrence, true)
+}
+
+// Navigation follows aliases to their definitions. Rename preserves explicit
+// aliases as separate bindings.
+pub(super) fn resolve_occurrence(
+    index: &Index,
+    uri: &Url,
+    occurrence: &Occurrence,
+    follow_aliases: bool,
+) -> Option<Symbol> {
+    if let Some((name, qualifier)) = &occurrence.callee {
+        let call = Occurrence {
+            name: name.clone(),
+            qualifier: qualifier.clone(),
+            span: occurrence.span,
+            declaration: false,
+            import_name: false,
+            callee: None,
+            type_context: false,
+        };
+        let function = resolve_occurrence(index, uri, &call, true)?;
+        let doc = index.get(&function.uri)?;
+        let (_, scope) = doc
+            .functions
+            .iter()
+            .find(|(span, _)| span.start() == function.start && span.end() == function.end)?;
+        let parameter = doc
+            .bindings
+            .iter()
+            .find(|binding| binding.scope == *scope && binding.name == occurrence.name)?;
+        return Some(Symbol {
+            uri: function.uri,
+            start: parameter.span.start(),
+            end: parameter.span.end(),
+        });
+    }
+    if occurrence.import_name {
+        let binding = index.get(uri)?.binding(&occurrence.name, occurrence.span.start())?;
+        let (target, Some(name)) = binding.import.as_ref()? else {
+            return None;
+        };
+        return resolve(index, target, name, 0, true, follow_aliases, &mut HashSet::new());
+    }
     if let Some(namespace) = &occurrence.qualifier {
-        let binding = index.get(uri)?.binding(namespace, occurrence.span.start())?;
+        let mut names = namespace.split("::");
+        let binding = index.get(uri)?.binding(names.next()?, occurrence.span.start())?;
         let (target, None) = binding.import.as_ref()? else {
             return None;
         };
-        return resolve(index, target, &occurrence.name, 0, true, &mut HashSet::new());
+        let mut target = target;
+        for name in names {
+            let symbol = resolve(index, target, name, 0, true, true, &mut HashSet::new())?;
+            let binding = index
+                .get(&symbol.uri)?
+                .bindings
+                .iter()
+                .find(|binding| binding.span.start() == symbol.start && binding.span.end() == symbol.end)?;
+            let (next, None) = binding.import.as_ref()? else {
+                return None;
+            };
+            target = next;
+        }
+        return resolve(
+            index,
+            target,
+            &occurrence.name,
+            0,
+            true,
+            follow_aliases,
+            &mut HashSet::new(),
+        );
     }
+
     resolve(
         index,
         uri,
         &occurrence.name,
         occurrence.span.start(),
         false,
+        follow_aliases,
         &mut HashSet::new(),
     )
 }
@@ -349,7 +529,7 @@ fn location(index: &Index, symbol: &Symbol) -> Option<Location> {
     })
 }
 
-fn document_path(uri: &Url) -> Option<kcl_lib::TypedPath> {
+pub(super) fn document_path(uri: &Url) -> Option<kcl_lib::TypedPath> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         Some(kcl_lib::TypedPath::new(&uri.to_file_path().ok()?.to_string_lossy()))
@@ -364,12 +544,17 @@ fn document_path(uri: &Url) -> Option<kcl_lib::TypedPath> {
 
 impl Backend {
     async fn navigation_index(&self, uri: &Url, workspace: bool) -> Index {
+        self.navigation_index_with_errors(uri, workspace).await.0
+    }
+
+    pub(super) async fn navigation_index_with_errors(&self, uri: &Url, workspace: bool) -> (Index, Vec<Url>) {
+        let mut failed = vec![];
         let mut pending = vec![uri.clone()];
         if workspace {
             #[cfg(not(target_arch = "wasm32"))]
             if let Ok(path) = uri.to_file_path() {
                 let root = self.document_project_root(&path);
-                let mut directories = vec![root];
+                let mut directories = if root.parent().is_some() { vec![root] } else { vec![] };
                 while let Some(directory) = directories.pop() {
                     let Ok(entries) = std::fs::read_dir(directory) else {
                         continue;
@@ -418,9 +603,11 @@ impl Backend {
             if let Some(document) = source.and_then(|source| Document::parse(&uri, source)) {
                 pending.extend(document.imports.iter().cloned());
                 index.insert(uri, document);
+            } else {
+                failed.push(uri);
             }
         }
-        index
+        (index, failed)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -600,6 +787,7 @@ mod tests {
                 "width",
                 index[&main].source.len() - 2,
                 false,
+                true,
                 &mut HashSet::new()
             )
             .is_none()
@@ -611,6 +799,7 @@ mod tests {
                 &Url::parse("file:///project/cycle.kcl").unwrap(),
                 "width",
                 0,
+                true,
                 true,
                 &mut HashSet::new()
             )

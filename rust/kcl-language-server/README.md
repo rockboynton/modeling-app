@@ -93,6 +93,16 @@ files in the project (nearest `project.toml`, or the containing workspace folder
 and imported modules. Built-in functions continue to provide hover documentation;
 object fields and built-in definitions are not navigable source bindings.
 
+Rename updates lexical bindings and their project references with targeted edits,
+preserving formatting, comments, and explicit import aliases. Renaming an alias
+updates its local binding; renaming an exported name updates import selectors
+without changing explicit aliases. Renames that capture another binding or collide
+with an existing name, including ambiguous parameter/type names, are rejected.
+Parameter renames update keyword labels on
+statically resolved calls; dynamic function-value flows are not resolved.
+Workspace rename requires readable, parseable
+KCL files. Implicit module names require an explicit import alias before renaming.
+
 The standalone native server checks each document with fresh mock execution,
 using its actual file path and nearest optional `project.toml`. Imports resolve
 from the entry point's directory and open imported buffers are read before disk.

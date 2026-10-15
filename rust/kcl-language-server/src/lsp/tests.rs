@@ -2329,9 +2329,9 @@ async fn test_kcl_lsp_rename() {
         vec![tower_lsp::lsp_types::TextEdit {
             range: tower_lsp::lsp_types::Range {
                 start: tower_lsp::lsp_types::Position { line: 0, character: 0 },
-                end: tower_lsp::lsp_types::Position { line: 0, character: 8 }
+                end: tower_lsp::lsp_types::Position { line: 0, character: 5 }
             },
-            new_text: "newName = 1\n".to_string()
+            new_text: "newName".to_string()
         }]
     );
 }
@@ -2382,43 +2382,20 @@ a1 = startSketchOn(offsetPlane(XY, offset = 10))
     // Check the rename.
     let changes = rename.changes.unwrap();
 
-    let last_character = 27;
-
-    // Get the last character of the last line of the original code.
-    assert_eq!(code.lines().last().unwrap().chars().count(), last_character);
-
-    let u: tower_lsp::lsp_types::Url = "file:///test.kcl".try_into().unwrap();
-    assert_eq!(
-        changes.get(&u).unwrap().clone(),
-        vec![tower_lsp::lsp_types::TextEdit {
-            range: tower_lsp::lsp_types::Range {
-                start: tower_lsp::lsp_types::Position { line: 0, character: 0 },
-                // Its important we get back the right number here so that we actually replace the whole text!!
-                end: tower_lsp::lsp_types::Position {
-                    line: 9,
-                    character: last_character as u32
-                }
-            },
-            new_text: "myVarName = 100
-
-a1 = startSketchOn(offsetPlane(XY, offset = 10))
-  |> startProfile(at = [0, 0])
-  |> line(end = [myVarName, 0])
-  |> yLine(length = -100.0)
-  |> xLine(length = -100.0)
-  |> yLine(length = 100.0)
-  |> close()
-  |> extrude(length = 3.14)\n"
-                .to_string()
-        }]
-    );
+    let uri: tower_lsp::lsp_types::Url = "file:///test.kcl".parse().unwrap();
+    let edits = &changes[&uri];
+    assert_eq!(edits.len(), 2);
+    let mut renamed = code.to_owned();
+    for edit in edits.iter().rev() {
+        let start = kcl_lib::lsp_position_to_byte(code, edit.range.start).unwrap();
+        let end = kcl_lib::lsp_position_to_byte(code, edit.range.end).unwrap();
+        renamed.replace_range(start..end, &edit.new_text);
+    }
+    assert_eq!(renamed, code.replace("myVARName", "myVarName"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_kcl_lsp_rename_local_in_if_arm_is_refused() {
-    // Renaming a declaration inside an if-expression arm isn't supported. The rename must
-    // return no edit, and prepare_rename must refuse, instead of producing a whole-document
-    // edit that only reformats the code.
+async fn test_kcl_lsp_rename_local_in_if_arm() {
     let server = kcl_lsp_server(false).await.unwrap();
 
     // Send open file.
@@ -2428,7 +2405,8 @@ async fn test_kcl_lsp_rename_local_in_if_arm_is_refused() {
                 uri: "file:///test.kcl".try_into().unwrap(),
                 language_id: "kcl".to_string(),
                 version: 1,
-                text: r#"x = if true {
+                text: r#"@settings(kclVersion = 3.0)
+x = if true {
   local_value = 1
   local_value
 } else {
@@ -2441,7 +2419,7 @@ async fn test_kcl_lsp_rename_local_in_if_arm_is_refused() {
         .await;
 
     // The position is on `local_value`'s declaration inside the `if` arm.
-    let position = tower_lsp::lsp_types::Position { line: 1, character: 3 };
+    let position = tower_lsp::lsp_types::Position { line: 2, character: 3 };
 
     // Send rename request.
     let rename = server
@@ -2457,7 +2435,10 @@ async fn test_kcl_lsp_rename_local_in_if_arm_is_refused() {
         })
         .await
         .unwrap();
-    assert_eq!(rename, None);
+    let edits = rename.unwrap().changes.unwrap();
+    let edits = edits.values().next().unwrap();
+    assert_eq!(edits.len(), 2);
+    assert!(edits.iter().all(|edit| edit.new_text == "localValue"));
 
     // Send prepare rename request.
     let prepared = server
@@ -2469,7 +2450,13 @@ async fn test_kcl_lsp_rename_local_in_if_arm_is_refused() {
         })
         .await
         .unwrap();
-    assert_eq!(prepared, None);
+    assert_eq!(
+        prepared,
+        Some(PrepareRenameResponse::Range(tower_lsp::lsp_types::Range::new(
+            tower_lsp::lsp_types::Position::new(2, 2),
+            tower_lsp::lsp_types::Position::new(2, 13),
+        )))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
