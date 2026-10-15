@@ -42,6 +42,18 @@ The 3D view in Design Studio is just a video stream from our hosted geometry eng
 
 We recommend downloading the latest application binary from our [website](https://zoo.dev/design-studio/download). If you don't see your platform or architecture supported there, please file an issue. See the [installation guide](INSTALL.md) for additional instructions.
 
+## KCL language server with Nix
+
+From a checkout of this repository, build or run the standalone language server:
+
+```sh
+nix build .#kcl-language-server
+nix run .#kcl-language-server -- --help
+```
+
+The flake exports `packages.<system>.kcl-language-server` for use in NixOS or
+Home Manager configurations. `nix develop` provides the development environment.
+
 ## Developing
 
 Finally, if you'd like to run a development build or contribute to the project, please visit our [contributor guide](CONTRIBUTING.md) to get started. To contribute to the KittyCAD Language, see the dedicated [readme](rust/kcl-lib/README.md) for KCL.
