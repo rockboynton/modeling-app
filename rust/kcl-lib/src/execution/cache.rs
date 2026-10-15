@@ -102,9 +102,15 @@ impl Cache {
 
     /// Read a named value from the previous sketch-mode execution.
     pub async fn read_old_memory_var(&self, name: &str) -> Option<KclValue> {
-        self.read_old_memory()
+        self.0
+            .inner()
+            .read()
             .await
-            .and_then(|memory| memory.stack.get(name, SourceRange::default()).ok())
+            .prev_memory
+            .as_ref()?
+            .stack
+            .get(name, SourceRange::default())
+            .ok()
     }
 }
 

@@ -109,6 +109,14 @@ and reads unsaved imports. Member completion supports incomplete `module.` and
 `module::` expressions and replaces the full identifier at the cursor. Object
 field inference and automatic imports are not currently provided.
 
+Inlay hints show inferred types and units for top-level variable declarations
+after successful execution. They reuse the diagnostic pass, skip explicitly
+typed expressions and function declarations, and respect the requested range.
+Changed buffers, failed checks, and closed documents invalidate hints. Clients
+that support workspace hint refresh are notified after each diagnostic pass,
+including passes triggered by imported buffers. Nested local variables and
+parameter-name hints are not currently provided.
+
 The standalone native server checks each document with fresh mock execution,
 using its actual file path and nearest optional `project.toml`. Imports resolve
 from the entry point's directory and open imported buffers are read before disk.

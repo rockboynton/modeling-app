@@ -129,6 +129,7 @@ use crate::parsing::token::adapter;
 
 mod completion;
 pub mod custom_notifications;
+mod hints;
 mod hover;
 mod navigation;
 #[cfg(not(target_arch = "wasm32"))]
@@ -202,6 +203,10 @@ pub struct Backend {
     pub open_documents: DashMap<String, i32>,
     /// Whether the client accepts versioned workspace edits.
     pub(super) supports_document_changes: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the client accepts workspace inlay hint refresh requests.
+    pub(super) supports_hint_refresh: Arc<std::sync::atomic::AtomicBool>,
+    /// Execution-derived hints for a specific document generation.
+    pub(super) hint_snapshots: DashMap<String, hints::HintSnapshot>,
     /// Diagnostics.
     pub diagnostics_map: DashMap<String, Vec<Diagnostic>>,
     /// Symbols map.
@@ -282,6 +287,8 @@ impl Backend {
             ast_map: Default::default(),
             code_map: Default::default(),
             diagnostics_map: Default::default(),
+            hint_snapshots: Default::default(),
+            supports_hint_refresh: Default::default(),
             open_documents: Default::default(),
             supports_document_changes: Default::default(),
             symbols_map: Default::default(),
@@ -480,6 +487,16 @@ impl crate::lsp::backend::Backend for Backend {
     }
 
     async fn inner_on_change(&self, params: TextDocumentItem, force: bool) {
+        self.update_document(params, force).await;
+        if self.supports_hint_refresh.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = self.client.inlay_hint_refresh().await;
+        }
+    }
+}
+
+impl Backend {
+    async fn update_document(&self, params: TextDocumentItem, force: bool) {
+        let hint_generation = self.begin_hint_snapshot(&params, force);
         if force {
             let cache = self.executor_ctx().await.as_ref().map(|ctx| ctx.cache.clone());
             if let Some(cache) = cache {
@@ -613,7 +630,10 @@ impl crate::lsp::backend::Backend for Backend {
         // them with the whole pass's set, the parse issues included.
         let mut items = convert_diagnostics(&params, &errs);
         match outcome {
-            Ok(issues) => items.extend(convert_diagnostics(&params, &issues)),
+            Ok((issues, hints)) => {
+                self.finish_hint_snapshot(&params, &hint_generation, hints);
+                items.extend(convert_diagnostics(&params, &issues));
+            }
             Err(mut err) => {
                 // A hard error carries the issues raised before it ended the run.
                 // Its own diagnostic renders only the message and source ranges.
@@ -902,7 +922,7 @@ impl Backend {
             .await;
     }
 
-    /// Run the program and return the compilation issues it raised.
+    /// Run the program and return compilation issues and inferred type hints.
     ///
     /// Returns no issues when this server is not set up to execute. The caller
     /// publishes the diagnostics, so that one publish carries the whole pass.
@@ -910,21 +930,22 @@ impl Backend {
         &self,
         ast: &Program,
         _uri: &tower_lsp::lsp_types::Url,
-    ) -> Result<Vec<CompilationIssue>, KclErrorWithOutputs> {
+    ) -> Result<(Vec<CompilationIssue>, Vec<InlayHint>), KclErrorWithOutputs> {
         // Check if we can execute.
         if !self.can_execute().await {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         // Execute the code if we have an executor context.
-        let ctx = self.executor_ctx().await;
+        // Execution and type extraction must observe the same cache state.
+        let ctx = self.executor_ctx.write().await;
         let Some(ref executor_ctx) = *ctx else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
 
         if !self.is_initialized().await {
             // We are not initialized yet.
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -941,7 +962,9 @@ impl Backend {
             executor_ctx.run_with_caching(ast.clone()).await
         };
 
-        result.map(|outcome| issues_in_top_level_module(outcome.issues))
+        let outcome = result?;
+        let hints = hints::inferred_type_hints(ast, executor_ctx).await;
+        Ok((issues_in_top_level_module(outcome.issues), hints))
     }
 
     pub fn get_semantic_token_type_index(&self, token_type: &SemanticTokenType) -> Option<u32> {
@@ -995,6 +1018,16 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, format!("initialize: {params:?}"))
             .await;
 
+        self.supports_hint_refresh.store(
+            params
+                .capabilities
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.inlay_hint.as_ref())
+                .and_then(|hint| hint.refresh_support)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.supports_document_changes.store(
             params
                 .capabilities
@@ -1028,6 +1061,7 @@ impl LanguageServer for Backend {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
@@ -1177,6 +1211,7 @@ impl LanguageServer for Backend {
         self.semantic_tokens_map.remove(uri.as_str());
         self.remove_from_ast_maps(uri.as_str());
         self.diagnostics_map.remove(uri.as_str());
+        self.hint_snapshots.remove(uri.as_str());
         self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
         self.do_did_close(params).await;
         #[cfg(not(target_arch = "wasm32"))]
@@ -1650,10 +1685,8 @@ impl LanguageServer for Backend {
         }
     }
 
-    async fn inlay_hint(&self, _params: InlayHintParams) -> RpcResult<Option<Vec<InlayHint>>> {
-        // TODO: do this
-
-        Ok(None)
+    async fn inlay_hint(&self, params: InlayHintParams) -> RpcResult<Option<Vec<InlayHint>>> {
+        Ok(self.document_inlay_hints(params))
     }
 
     async fn semantic_tokens_full(&self, params: SemanticTokensParams) -> RpcResult<Option<SemanticTokensResult>> {

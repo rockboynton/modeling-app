@@ -62,7 +62,7 @@ impl Backend {
         &self,
         ast: &Program,
         uri: &Url,
-    ) -> Result<Vec<CompilationIssue>, KclErrorWithOutputs> {
+    ) -> Result<(Vec<CompilationIssue>, Vec<tower_lsp::lsp_types::InlayHint>), KclErrorWithOutputs> {
         let path = uri
             .to_file_path()
             .map_err(|_| input_error("Document URI is not a local file"))?;
@@ -90,8 +90,13 @@ impl Backend {
                 },
             )
             .await;
+        let hints = if result.is_ok() {
+            super::hints::inferred_type_hints(ast, &context).await
+        } else {
+            vec![]
+        };
         context.close().await;
-        result.map(|outcome| issues_in_top_level_module(outcome.issues))
+        result.map(|outcome| (issues_in_top_level_module(outcome.issues), hints))
     }
 
     pub(super) async fn refresh_project_documents(&self, changed: &Url) {

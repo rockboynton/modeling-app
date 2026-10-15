@@ -4709,7 +4709,7 @@ async fn advertised_capabilities_enable_document_symbols_and_save_notifications(
         capabilities["signatureHelpProvider"]["triggerCharacters"],
         serde_json::json!(["(", ","])
     );
-    assert!(capabilities.get("inlayHintProvider").is_none());
+    assert_eq!(capabilities["inlayHintProvider"], true);
 
     let uri: tower_lsp::lsp_types::Url = "file:///capabilities.kcl".parse().unwrap();
     server

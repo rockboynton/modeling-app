@@ -66,6 +66,8 @@ async fn build_kcl_lsp_server(
         diagnostics_map: Default::default(),
         open_documents: Default::default(),
         supports_document_changes: Default::default(),
+        hint_snapshots: Default::default(),
+        supports_hint_refresh: Default::default(),
         symbols_map: Default::default(),
         semantic_tokens_map: Default::default(),
         zoo_client,
