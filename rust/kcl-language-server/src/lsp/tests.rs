@@ -4392,7 +4392,10 @@ async fn test_kcl_lsp_prepare_rename() {
     // Check the result.
     assert_eq!(
         result,
-        PrepareRenameResponse::DefaultBehavior { default_behavior: true }
+        PrepareRenameResponse::Range(tower_lsp::lsp_types::Range::new(
+            tower_lsp::lsp_types::Position::new(0, 0),
+            tower_lsp::lsp_types::Position::new(0, 5),
+        ))
     );
 }
 
@@ -4703,4 +4706,47 @@ async fn repeated_pass_settles_on_the_same_diagnostics() {
         settled,
         "the second pass settled somewhere else"
     );
+}
+
+// Exercise the initialize contract a client uses to decide which requests and
+// notifications to send, rather than calling unadvertised handlers directly.
+#[tokio::test]
+async fn advertised_capabilities_enable_document_symbols_and_save_notifications() {
+    let server = kcl_lsp_server(false).await.unwrap();
+    let response = server.initialize(Default::default()).await.unwrap();
+    let capabilities = serde_json::to_value(response.capabilities).unwrap();
+    assert_eq!(capabilities["documentSymbolProvider"], true);
+    assert_eq!(capabilities["renameProvider"]["prepareProvider"], true);
+    assert_eq!(capabilities["textDocumentSync"]["save"]["includeText"], true);
+    assert_eq!(
+        capabilities["signatureHelpProvider"]["triggerCharacters"],
+        serde_json::json!(["(", ","])
+    );
+    assert!(capabilities.get("inlayHintProvider").is_none());
+
+    let uri: tower_lsp::lsp_types::Url = "file:///capabilities.kcl".parse().unwrap();
+    server
+        .did_open(tower_lsp::lsp_types::DidOpenTextDocumentParams {
+            text_document: tower_lsp::lsp_types::TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "kcl".into(),
+                version: 1,
+                text: "@settings(kclVersion = 3.0)\nwidth = 20mm\nheight = width * 2\n".into(),
+            },
+        })
+        .await;
+    let symbols = server
+        .document_symbol(tower_lsp::lsp_types::DocumentSymbolParams {
+            text_document: tower_lsp::lsp_types::TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let tower_lsp::lsp_types::DocumentSymbolResponse::Nested(symbols) = symbols else {
+        panic!("expected a document outline");
+    };
+    assert!(symbols.iter().any(|symbol| symbol.name == "width"));
+    assert!(symbols.iter().any(|symbol| symbol.name == "height"));
 }

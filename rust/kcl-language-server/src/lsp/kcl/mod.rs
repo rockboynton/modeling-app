@@ -72,7 +72,9 @@ use tower_lsp::lsp_types::Position;
 use tower_lsp::lsp_types::PrepareRenameResponse;
 use tower_lsp::lsp_types::RelatedFullDocumentDiagnosticReport;
 use tower_lsp::lsp_types::RenameFilesParams;
+use tower_lsp::lsp_types::RenameOptions;
 use tower_lsp::lsp_types::RenameParams;
+use tower_lsp::lsp_types::SaveOptions;
 use tower_lsp::lsp_types::SemanticToken;
 use tower_lsp::lsp_types::SemanticTokenModifier;
 use tower_lsp::lsp_types::SemanticTokenType;
@@ -95,6 +97,7 @@ use tower_lsp::lsp_types::TextDocumentRegistrationOptions;
 use tower_lsp::lsp_types::TextDocumentSyncCapability;
 use tower_lsp::lsp_types::TextDocumentSyncKind;
 use tower_lsp::lsp_types::TextDocumentSyncOptions;
+use tower_lsp::lsp_types::TextDocumentSyncSaveOptions;
 use tower_lsp::lsp_types::TextEdit;
 use tower_lsp::lsp_types::WorkDoneProgressOptions;
 use tower_lsp::lsp_types::WorkspaceEdit;
@@ -1069,10 +1072,13 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
-                inlay_hint_provider: Some(OneOf::Left(true)),
-                rename_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
                     SemanticTokensRegistrationOptions {
                         text_document_registration_options: {
@@ -1097,13 +1103,16 @@ impl LanguageServer for Backend {
                     },
                 )),
                 signature_help_provider: Some(SignatureHelpOptions {
-                    trigger_characters: None,
+                    trigger_characters: Some(vec!["(".into(), ",".into()]),
                     retrigger_characters: None,
                     ..Default::default()
                 }),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
                     open_close: Some(true),
                     change: Some(TextDocumentSyncKind::FULL),
+                    save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                        include_text: Some(true),
+                    })),
                     ..Default::default()
                 })),
                 workspace: Some(WorkspaceServerCapabilities {
@@ -1750,15 +1759,32 @@ impl LanguageServer for Backend {
     }
 
     async fn prepare_rename(&self, params: TextDocumentPositionParams) -> RpcResult<Option<PrepareRenameResponse>> {
-        if self
-            .inner_prepare_rename(&params, "someNameNoOneInTheirRightMindWouldEverUseForTesting")?
-            .is_none()
-        {
+        let Some((code, _)) =
+            self.inner_prepare_rename(&params, "someNameNoOneInTheirRightMindWouldEverUseForTesting")?
+        else {
             return Ok(None);
-        }
-
-        // Return back to the client, that it is safe to use the rename behavior.
-        Ok(Some(PrepareRenameResponse::DefaultBehavior { default_behavior: true }))
+        };
+        let offset = position_to_char_index(params.position, &code);
+        let Some(tokens) = self.token_map.get(params.text_document.uri.as_str()) else {
+            return Ok(None);
+        };
+        let range = tokens
+            .as_slice()
+            .iter()
+            .find(|token| {
+                token.token_type == crate::parsing::token::TokenType::Word
+                    && token.start <= offset
+                    && offset <= token.end
+            })
+            .and_then(|token| {
+                Some(tower_lsp::lsp_types::Range::new(
+                    crate::lsp::util::byte_to_position(&code, token.start)?,
+                    crate::lsp::util::byte_to_position(&code, token.end)?,
+                ))
+            });
+        // A concrete range works even when the client does not support the
+        // optional prepareSupportDefaultBehavior capability.
+        Ok(range.map(PrepareRenameResponse::Range))
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> RpcResult<Option<Vec<FoldingRange>>> {

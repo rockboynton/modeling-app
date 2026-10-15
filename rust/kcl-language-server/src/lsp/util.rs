@@ -4,6 +4,15 @@ pub use kcl_lib::IntoDiagnostic;
 use ropey::Rope;
 use tower_lsp::lsp_types::Position;
 
+/// Convert a UTF-8 source offset to the UTF-16 position used by LSP.
+pub(super) fn byte_to_position(source: &str, offset: usize) -> Option<Position> {
+    let prefix = source.get(..offset)?;
+    Some(Position::new(
+        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
+        prefix.rsplit('\n').next()?.encode_utf16().count() as u32,
+    ))
+}
+
 pub fn position_to_offset(position: Position, rope: &Rope) -> Option<usize> {
     Some(rope.try_line_to_char(position.line as usize).ok()? + position.character as usize)
 }
