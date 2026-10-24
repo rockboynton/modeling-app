@@ -129,8 +129,10 @@ after successful execution. They reuse the diagnostic pass, skip explicitly
 typed expressions and function declarations, and respect the requested range.
 Changed buffers, failed checks, and closed documents invalidate hints. Clients
 that support workspace hint refresh are notified after each diagnostic pass,
-including passes triggered by imported buffers. Nested local variables and
-parameter-name hints are not currently provided.
+including passes triggered by imported buffers. Nested locals also receive
+conservative source type hints from literals and lexical annotations without
+execution; unknown types are omitted. Parameter-name hints are not currently
+provided.
 
 The standalone native server checks each document with fresh mock execution,
 using its actual file path and nearest optional `project.toml`. Imports resolve

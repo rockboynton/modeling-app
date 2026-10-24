@@ -86,6 +86,49 @@ impl Backend {
         }
     }
 
+    pub(super) async fn editor_inlay_hints(&self, params: InlayHintParams) -> Option<Vec<InlayHint>> {
+        let uri = &params.text_document.uri;
+        let source = String::from_utf8(self.code_map.get(uri.as_str())?.clone()).ok()?;
+        let mut hints = self.document_inlay_hints(params.clone()).unwrap_or_default();
+        let index = self.navigation_index(uri, false).await;
+        if let Some(document) = index.get(uri)
+            && let Ok(program) = Program::parse_no_errs(&document.source)
+        {
+            let source_hints = std::cell::RefCell::new(Vec::new());
+            let _ = crate::walk::walk(&program.ast, |node| {
+                if let crate::walk::Node::VariableDeclaration(value) = node
+                    && !matches!(
+                        value.declaration.init,
+                        Expr::FunctionExpression(_) | Expr::AscribedExpression(_)
+                    )
+                    && document
+                        .functions
+                        .iter()
+                        .any(|(_, scope)| scope.start() <= value.start && value.end <= scope.end())
+                    && let Some(shape) = super::shapes::expression(&index, uri, &value.declaration.init, 0)
+                    && !shape.label.is_empty()
+                    && let Some(position) = kcl_lib::byte_to_lsp_position(&source, value.declaration.id.end)
+                {
+                    source_hints.borrow_mut().push(InlayHint {
+                        position,
+                        label: InlayHintLabel::String(format!(": {}", shape.label)),
+                        kind: Some(InlayHintKind::TYPE),
+                        padding_left: Some(false),
+                        padding_right: Some(false),
+                        text_edits: None,
+                        tooltip: None,
+                        data: None,
+                    });
+                }
+                Ok::<_, anyhow::Error>(true)
+            });
+            hints.extend(source_hints.into_inner());
+        }
+        hints.retain(|hint| params.range.start <= hint.position && hint.position < params.range.end);
+        hints.sort_by_key(|hint| hint.position);
+        Some(hints)
+    }
+
     pub(super) fn document_inlay_hints(&self, params: InlayHintParams) -> Option<Vec<InlayHint>> {
         let uri = params.text_document.uri;
         let snapshot = self.hint_snapshots.get(uri.as_str())?;
@@ -296,5 +339,23 @@ mod tests {
         assert_eq!(hints.len(), 1);
         assert_eq!(label(&hints[0]), ": number(mm)");
         context.close().await;
+    }
+    #[tokio::test]
+    async fn nested_type_hints_use_lexical_annotations_without_execution() {
+        let server = crate::lsp::test_util::kcl_lsp_server(false).await.unwrap();
+        let uri = Url::parse("file:///nested-hints.kcl").unwrap();
+        let source = "@settings(kclVersion = 3.0)\nwidth = 2deg\nfn panel(@width: number(mm)) {\nlocal = width * 2\nexplicit = (2mm: number(mm))\nunknown = missing()\nreturn local\n}\n";
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: item(&uri, source),
+            })
+            .await;
+        let hints = server.inlay_hint(params(&uri, all())).await.unwrap().unwrap();
+        assert_eq!(hints.len(), 1, "{hints:?}");
+        assert_eq!(label(&hints[0]), ": number(mm)");
+        assert_eq!(
+            hints[0].position,
+            kcl_lib::byte_to_lsp_position(source, source.find("local =").unwrap() + 5).unwrap()
+        );
     }
 }

@@ -1575,7 +1575,7 @@ impl LanguageServer for Backend {
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> RpcResult<Option<Vec<InlayHint>>> {
-        Ok(self.document_inlay_hints(params))
+        Ok(self.editor_inlay_hints(params).await)
     }
 
     async fn semantic_tokens_full(&self, params: SemanticTokensParams) -> RpcResult<Option<SemanticTokensResult>> {
