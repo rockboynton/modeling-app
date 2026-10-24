@@ -92,7 +92,7 @@ impl Backend {
         let mut hints = self.document_inlay_hints(params.clone()).unwrap_or_default();
         let index = self.navigation_index(uri, false).await;
         if let Some(document) = index.get(uri)
-            && let Ok(program) = Program::parse_no_errs(&document.source)
+            && let Ok(program) = Program::parse_no_errs(&source)
         {
             let source_hints = std::cell::RefCell::new(Vec::new());
             let _ = crate::walk::walk(&program.ast, |node| {

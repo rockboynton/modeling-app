@@ -553,7 +553,7 @@ pub(super) fn document_path(uri: &Url) -> Option<kcl_lib::TypedPath> {
 
 impl Backend {
     pub(super) async fn navigation_index(&self, uri: &Url, workspace: bool) -> Index {
-        self.navigation_index_with_errors(uri, workspace).await.0
+        self.editor_index_with_source(uri, workspace, None).await.0
     }
 
     pub(super) async fn navigation_index_with_errors(&self, uri: &Url, workspace: bool) -> (Index, Vec<Url>) {
@@ -564,7 +564,26 @@ impl Backend {
         &self,
         uri: &Url,
         workspace: bool,
+        source_override: Option<String>,
+    ) -> (Index, Vec<Url>) {
+        self.index_with_options(uri, workspace, source_override, false).await
+    }
+
+    pub(super) async fn editor_index_with_source(
+        &self,
+        uri: &Url,
+        workspace: bool,
+        source: Option<String>,
+    ) -> (Index, Vec<Url>) {
+        self.index_with_options(uri, workspace, source, true).await
+    }
+
+    async fn index_with_options(
+        &self,
+        uri: &Url,
+        workspace: bool,
         mut source_override: Option<String>,
+        recover: bool,
     ) -> (Index, Vec<Url>) {
         let root = uri.clone();
         let mut failed = vec![];
@@ -621,7 +640,14 @@ impl Backend {
             } else {
                 None
             };
-            if let Some(document) = source.and_then(|source| Document::parse(&uri, source)) {
+            if let Some(document) = source.and_then(|source| {
+                Document::parse(&uri, source.clone()).or_else(|| {
+                    recover
+                        .then(|| super::recovery::source(&source))
+                        .flatten()
+                        .and_then(|source| Document::parse(&uri, source))
+                })
+            }) {
                 pending.extend(document.imports.iter().cloned());
                 index.insert(uri, document);
             } else {

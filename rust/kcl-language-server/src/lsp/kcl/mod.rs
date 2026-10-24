@@ -136,6 +136,7 @@ mod hover;
 mod navigation;
 #[cfg(not(target_arch = "wasm32"))]
 mod project;
+mod recovery;
 mod rename;
 mod shapes;
 mod source_hover;

@@ -47,7 +47,7 @@ impl Backend {
             }
             let source =
                 (!self.open_documents.contains_key(seed.as_str())).then(|| "@settings(kclVersion = 3.0)\n".into());
-            let (index, _) = self.navigation_index_with_source(&seed, true, source).await;
+            let (index, _) = self.editor_index_with_source(&seed, true, source).await;
             documents.extend(index);
         }
         let mut symbols = vec![];

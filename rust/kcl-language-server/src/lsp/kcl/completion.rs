@@ -251,7 +251,7 @@ impl Backend {
         } else {
             source.to_owned()
         };
-        let (index, _) = self.navigation_index_with_source(uri, false, Some(recovered)).await;
+        let (index, _) = self.editor_index_with_source(uri, false, Some(recovered)).await;
         if let Some(fields) = super::shapes::member_fields(&index, uri, offset) {
             let items = fields
                 .into_iter()

@@ -108,6 +108,11 @@ Signature help resolves user functions through lexical scopes and imports,
 shows source parameter types and documentation, and tracks the active parameter
 by argument label when named arguments are reordered.
 
+Read-only source assistance can recover unfinished calls and nearby broken
+statement lines with bounded, position-preserving parsing. It declines recovery
+that would remove a scope boundary. Diagnostic execution and rename keep strict
+parsing, and recovery never changes the editor buffer or hides its diagnostics.
+
 Rename updates lexical bindings and their project references with targeted edits,
 preserving formatting, comments, and explicit import aliases. Renaming an alias
 updates its local binding; renaming an exported name updates import selectors
