@@ -90,8 +90,14 @@ members, and unambiguous glob imports. Navigation uses the AST rather than
 execution results, respects lexical scopes and export visibility, and prefers
 open editor buffers over disk contents. Native reference searches include KCL
 files in the project (nearest `project.toml`, or the containing workspace folder)
-and imported modules. Built-in functions continue to provide hover documentation;
-object fields and built-in definitions are not navigable source bindings.
+and imported modules. Object fields and built-in definitions are not navigable
+source bindings.
+
+Hover shows source signatures and preceding comments for user-defined bindings,
+including imported functions, aliases, and reexports. Module hovers show leading
+module comments. Source documentation works without execution and uses unsaved
+editor buffers. Variable hovers retain available runtime types and values, with
+source comments appended. Built-in hover documentation is also supported.
 
 Rename updates lexical bindings and their project references with targeted edits,
 preserving formatting, comments, and explicit import aliases. Renaming an alias

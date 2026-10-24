@@ -135,6 +135,7 @@ mod navigation;
 #[cfg(not(target_arch = "wasm32"))]
 mod project;
 mod rename;
+mod source_hover;
 
 const SEMANTIC_TOKEN_TYPES: [SemanticTokenType; 10] = [
     SemanticTokenType::NUMBER,
@@ -1255,180 +1256,24 @@ impl LanguageServer for Backend {
     }
 
     async fn hover(&self, params: HoverParams) -> RpcResult<Option<LspHover>> {
-        let filename = params.text_document_position_params.text_document.uri.to_string();
-
-        let Some(current_code) = self.code_map.get(&filename) else {
-            return Ok(None);
-        };
-        let Ok(current_code) = std::str::from_utf8(&current_code) else {
-            return Ok(None);
-        };
-
-        let Some(pos) = position_to_byte(params.text_document_position_params.position, current_code) else {
-            return Ok(None);
-        };
-
-        // Let's iterate over the AST and find the node that contains the cursor.
-        let Some(ast) = self.ast_map.get(&filename) else {
-            return Ok(None);
-        };
-
-        let Some(hover) = ast
-            .ast
-            .get_hover_value_for_position(pos, current_code, &HoverOpts::default_for_hover())
-        else {
-            return Ok(None);
-        };
-        let stdlib_completions = self.stdlib_completions_for_position(&ast, pos);
-        let stdlib_args = self.stdlib_args_for_position(&ast, pos);
-
-        match hover {
-            Hover::Function { name, range } => {
-                let (sig, docs) = if let Some(Some(result)) = with_cached_var(self, &name, |value| {
-                    match value {
-                        // User-defined function
-                        KclValue::Function { value, .. } if !value.is_std() => {
-                            // TODO get docs from comments
-                            Some((value.ast.signature(), ""))
-                        }
-                        _ => None,
-                    }
-                })
-                .await
-                {
-                    result
-                } else {
-                    // Get the docs for this function.
-                    let Some(completion) = stdlib_completions.get(&name) else {
-                        return Ok(None);
-                    };
-                    let Some(docs) = &completion.documentation else {
-                        return Ok(None);
-                    };
-
-                    let docs = match docs {
-                        Documentation::String(docs) => docs,
-                        Documentation::MarkupContent(MarkupContent { value, .. }) => value,
-                    };
-
-                    let docs = if docs.len() > 320 {
-                        let end = docs.find("\n\n").or_else(|| docs.find("\n\r\n")).unwrap_or(320);
-                        &docs[..end]
-                    } else {
-                        &**docs
-                    };
-
-                    let Some(label_details) = &completion.label_details else {
-                        return Ok(None);
-                    };
-
-                    let sig = if let Some(detail) = &label_details.detail {
-                        detail.clone()
-                    } else {
-                        String::new()
-                    };
-
-                    (sig, docs)
-                };
-
-                Ok(Some(LspHover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: format!("```\n{name}{sig}\n```\n\n{docs}"),
-                    }),
-                    range: Some(range),
-                }))
-            }
-            Hover::Type { name, range } => {
-                let Some(completion) = stdlib_completions.get(&name) else {
-                    return Ok(None);
-                };
-                let Some(docs) = &completion.documentation else {
-                    return Ok(None);
-                };
-
-                let docs = match docs {
-                    Documentation::String(docs) => docs,
-                    Documentation::MarkupContent(MarkupContent { value, .. }) => value,
-                };
-
-                let docs = if docs.len() > 320 {
-                    let end = docs.find("\n\n").or_else(|| docs.find("\n\r\n")).unwrap_or(320);
-                    &docs[..end]
-                } else {
-                    &**docs
-                };
-
-                Ok(Some(LspHover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: format!("```\n{name}\n```\n\n{docs}"),
-                    }),
-                    range: Some(range),
-                }))
-            }
-            Hover::KwArg {
-                name,
-                callee_name,
-                range,
-            } => {
-                // TODO handle user-defined functions too
-
-                let Some(arg_map) = stdlib_args.get(&callee_name) else {
-                    return Ok(None);
-                };
-
-                let Some(arg_entry) = arg_map.get(&name) else {
-                    return Ok(None);
-                };
-
-                Ok(Some(LspHover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: arg_entry.tip.clone(),
-                    }),
-                    range: Some(range),
-                }))
-            }
-            Hover::Variable {
-                name,
-                ty: Some(ty),
-                range,
-            } => Ok(Some(LspHover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: format!("```\n{name}: {ty}\n```"),
-                }),
-                range: Some(range),
-            })),
-            Hover::Variable { name, ty: None, range } => Ok(with_cached_var(self, &name, |value| {
-                let mut text: String = format!("```\n{name}");
-                if let Some(ty) = value.principal_type() {
-                    text.push_str(&format!(": {}", ty.human_friendly_type()));
-                }
-                if let Some(v) = value.value_str() {
-                    text.push_str(&format!(" = {v}"));
-                }
-                text.push_str("\n```");
-
-                LspHover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: text,
-                    }),
-                    range: Some(range),
-                }
-            })
-            .await),
-            Hover::Signature { .. } => Ok(None),
-            Hover::Comment { value, range } => Ok(Some(LspHover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value,
-                }),
-                range: Some(range),
-            })),
+        let source = self.source_hover(&params.text_document_position_params).await;
+        if source.as_ref().is_some_and(|source| source.prefer_source) {
+            return Ok(source.map(|source| source.hover));
         }
+        let runtime = self.runtime_hover(params).await?;
+        Ok(match (runtime, source) {
+            (Some(mut runtime), Some(source)) => {
+                if !source.docs.is_empty()
+                    && let HoverContents::Markup(content) = &mut runtime.contents
+                {
+                    content.value.push_str("\n\n");
+                    content.value.push_str(&source.docs);
+                }
+                Some(runtime)
+            }
+            (None, Some(source)) => Some(source.hover),
+            (runtime, None) => runtime,
+        })
     }
 
     async fn completion(&self, params: CompletionParams) -> RpcResult<Option<CompletionResponse>> {
@@ -2114,6 +1959,185 @@ fn get_arg_maps_from_stdlib_in_context(
 /// Convert a UTF-16 LSP position to the byte offsets used by the AST.
 fn position_to_byte(position: Position, code: &str) -> Option<usize> {
     kcl_lib::lsp_position_to_byte(code, position)
+}
+
+impl Backend {
+    async fn runtime_hover(&self, params: HoverParams) -> RpcResult<Option<LspHover>> {
+        let filename = params.text_document_position_params.text_document.uri.to_string();
+
+        let Some(current_code) = self.code_map.get(&filename) else {
+            return Ok(None);
+        };
+        let Ok(current_code) = std::str::from_utf8(&current_code) else {
+            return Ok(None);
+        };
+
+        let Some(pos) = position_to_byte(params.text_document_position_params.position, current_code) else {
+            return Ok(None);
+        };
+
+        // Let's iterate over the AST and find the node that contains the cursor.
+        let Some(ast) = self.ast_map.get(&filename) else {
+            return Ok(None);
+        };
+
+        let Some(hover) = ast
+            .ast
+            .get_hover_value_for_position(pos, current_code, &HoverOpts::default_for_hover())
+        else {
+            return Ok(None);
+        };
+        let stdlib_completions = self.stdlib_completions_for_position(&ast, pos);
+        let stdlib_args = self.stdlib_args_for_position(&ast, pos);
+
+        match hover {
+            Hover::Function { name, range } => {
+                let (sig, docs) = if let Some(Some(result)) = with_cached_var(self, &name, |value| {
+                    match value {
+                        // User-defined function
+                        KclValue::Function { value, .. } if !value.is_std() => {
+                            // TODO get docs from comments
+                            Some((value.ast.signature(), ""))
+                        }
+                        _ => None,
+                    }
+                })
+                .await
+                {
+                    result
+                } else {
+                    // Get the docs for this function.
+                    let Some(completion) = stdlib_completions.get(&name) else {
+                        return Ok(None);
+                    };
+                    let Some(docs) = &completion.documentation else {
+                        return Ok(None);
+                    };
+
+                    let docs = match docs {
+                        Documentation::String(docs) => docs,
+                        Documentation::MarkupContent(MarkupContent { value, .. }) => value,
+                    };
+
+                    let docs = if docs.len() > 320 {
+                        let end = docs.find("\n\n").or_else(|| docs.find("\n\r\n")).unwrap_or(320);
+                        &docs[..end]
+                    } else {
+                        &**docs
+                    };
+
+                    let Some(label_details) = &completion.label_details else {
+                        return Ok(None);
+                    };
+
+                    let sig = if let Some(detail) = &label_details.detail {
+                        detail.clone()
+                    } else {
+                        String::new()
+                    };
+
+                    (sig, docs)
+                };
+
+                Ok(Some(LspHover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: format!("```\n{name}{sig}\n```\n\n{docs}"),
+                    }),
+                    range: Some(range),
+                }))
+            }
+            Hover::Type { name, range } => {
+                let Some(completion) = stdlib_completions.get(&name) else {
+                    return Ok(None);
+                };
+                let Some(docs) = &completion.documentation else {
+                    return Ok(None);
+                };
+
+                let docs = match docs {
+                    Documentation::String(docs) => docs,
+                    Documentation::MarkupContent(MarkupContent { value, .. }) => value,
+                };
+
+                let docs = if docs.len() > 320 {
+                    let end = docs.find("\n\n").or_else(|| docs.find("\n\r\n")).unwrap_or(320);
+                    &docs[..end]
+                } else {
+                    &**docs
+                };
+
+                Ok(Some(LspHover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: format!("```\n{name}\n```\n\n{docs}"),
+                    }),
+                    range: Some(range),
+                }))
+            }
+            Hover::KwArg {
+                name,
+                callee_name,
+                range,
+            } => {
+                // TODO handle user-defined functions too
+
+                let Some(arg_map) = stdlib_args.get(&callee_name) else {
+                    return Ok(None);
+                };
+
+                let Some(arg_entry) = arg_map.get(&name) else {
+                    return Ok(None);
+                };
+
+                Ok(Some(LspHover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: arg_entry.tip.clone(),
+                    }),
+                    range: Some(range),
+                }))
+            }
+            Hover::Variable {
+                name,
+                ty: Some(ty),
+                range,
+            } => Ok(Some(LspHover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("```\n{name}: {ty}\n```"),
+                }),
+                range: Some(range),
+            })),
+            Hover::Variable { name, ty: None, range } => Ok(with_cached_var(self, &name, |value| {
+                let mut text: String = format!("```\n{name}");
+                if let Some(ty) = value.principal_type() {
+                    text.push_str(&format!(": {}", ty.human_friendly_type()));
+                }
+                if let Some(v) = value.value_str() {
+                    text.push_str(&format!(" = {v}"));
+                }
+                text.push_str("\n```");
+
+                LspHover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: text,
+                    }),
+                    range: Some(range),
+                }
+            })
+            .await),
+            Hover::Signature { .. } => Ok(None),
+            Hover::Comment { value, range } => Ok(Some(LspHover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value,
+                }),
+                range: Some(range),
+            })),
+        }
+    }
 }
 
 async fn with_cached_var<T>(backend: &Backend, name: &str, f: impl Fn(&KclValue) -> T) -> Option<T> {

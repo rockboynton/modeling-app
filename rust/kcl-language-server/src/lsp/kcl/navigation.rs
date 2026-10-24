@@ -552,7 +552,7 @@ pub(super) fn document_path(uri: &Url) -> Option<kcl_lib::TypedPath> {
 }
 
 impl Backend {
-    async fn navigation_index(&self, uri: &Url, workspace: bool) -> Index {
+    pub(super) async fn navigation_index(&self, uri: &Url, workspace: bool) -> Index {
         self.navigation_index_with_errors(uri, workspace).await.0
     }
 
