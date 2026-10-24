@@ -93,6 +93,11 @@ files in the project (nearest `project.toml`, or the containing workspace folder
 and imported modules. Object fields and built-in definitions are not navigable
 source bindings.
 
+Workspace symbol search finds top-level functions, types, and variables with
+case-insensitive subsequence queries. Native searches include unopened project
+files; open buffers take precedence over disk. Imports, parameters, nested
+locals, and build/dependency directories are excluded.
+
 Hover shows source signatures and preceding comments for user-defined bindings,
 including imported functions, aliases, and reexports. Module hovers show leading
 module comments. Source documentation works without execution and uses unsaved

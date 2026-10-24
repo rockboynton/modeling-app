@@ -139,6 +139,7 @@ mod project;
 mod rename;
 mod shapes;
 mod source_hover;
+mod workspace_symbols;
 
 const SEMANTIC_TOKEN_TYPES: [SemanticTokenType; 10] = [
     SemanticTokenType::NUMBER,
@@ -1062,8 +1063,17 @@ impl LanguageServer for Backend {
                 .unwrap_or(false),
             std::sync::atomic::Ordering::Relaxed,
         );
-        self.add_workspace_folders(params.workspace_folders.unwrap_or_default())
-            .await;
+        let mut folders = params.workspace_folders.unwrap_or_default();
+        #[allow(deprecated)]
+        if folders.is_empty()
+            && let Some(uri) = params.root_uri
+        {
+            folders.push(WorkspaceFolder {
+                name: uri.to_string(),
+                uri,
+            });
+        }
+        self.add_workspace_folders(folders).await;
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 definition_provider: Some(OneOf::Left(true)),
@@ -1083,6 +1093,7 @@ impl LanguageServer for Backend {
                 }),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
@@ -1572,6 +1583,13 @@ impl LanguageServer for Backend {
                 return Ok(None);
             }
         }
+    }
+
+    async fn symbol(
+        &self,
+        params: tower_lsp::lsp_types::WorkspaceSymbolParams,
+    ) -> RpcResult<Option<Vec<tower_lsp::lsp_types::SymbolInformation>>> {
+        Ok(Some(self.search_workspace_symbols(&params.query).await))
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> RpcResult<Option<Vec<InlayHint>>> {
