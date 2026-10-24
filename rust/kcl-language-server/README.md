@@ -119,7 +119,10 @@ and reads unsaved imports. Member completion supports incomplete `module.` and
 `module::` expressions and replaces the full identifier at the cursor. Object
 fields are inferred conservatively from literals, annotated parameters and type
 aliases, array elements, and declared function return types, including imports.
-Automatic imports are not currently provided.
+After at least two identifier characters, completion also offers public project
+exports with an import edit. It skips names already in scope, preserves settings
+and comments, and uses relative paths. Native discovery includes unopened project
+files; WASM discovery uses documents available through its filesystem.
 
 Inlay hints show inferred types and units for top-level variable declarations
 after successful execution. They reuse the diagnostic pass, skip explicitly

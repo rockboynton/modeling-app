@@ -127,6 +127,7 @@ use crate::parsing::token::RESERVED_WORDS;
 use crate::parsing::token::TokenStream;
 use crate::parsing::token::adapter;
 
+mod auto_import;
 mod calls;
 mod completion;
 pub mod custom_notifications;
@@ -1361,7 +1362,25 @@ impl LanguageServer for Backend {
             }
             return Ok(Some(CompletionResponse::Array(members)));
         }
-        let locals = lexical.map(|items| items.items).unwrap_or_default();
+        let mut locals = lexical.as_ref().map(|items| items.items.clone()).unwrap_or_default();
+        if let Some(lexical) = lexical.as_ref() {
+            let occupied = locals
+                .iter()
+                .chain(self.stdlib_completions.values())
+                .chain(self.kcl_keywords.values())
+                .map(|item| item.label.clone())
+                .collect();
+            locals.extend(
+                self.auto_import_completions(
+                    &params.text_document_position.text_document.uri,
+                    current_code,
+                    position,
+                    lexical.range,
+                    occupied,
+                )
+                .await,
+            );
+        }
 
         // Add more to the completions if we have more.
         let Some(ast) = self

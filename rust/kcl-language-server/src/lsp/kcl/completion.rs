@@ -83,7 +83,7 @@ fn occurrence(name: &str, span: SourceRange, qualifier: Option<String>) -> Occur
     }
 }
 
-fn completion(index: &Index, uri: &Url, binding: &Binding, label: &str, range: Range) -> CompletionItem {
+pub(super) fn completion(index: &Index, uri: &Url, binding: &Binding, label: &str, range: Range) -> CompletionItem {
     let resolved = resolve_occurrence(index, uri, &occurrence(&binding.name, binding.span, None), true);
     let (document, source) = resolved
         .as_ref()
@@ -127,7 +127,7 @@ fn completion(index: &Index, uri: &Url, binding: &Binding, label: &str, range: R
     }
 }
 
-fn exported_names(index: &Index, uri: &Url, visited: &mut HashSet<Url>) -> BTreeSet<String> {
+pub(super) fn exported_names(index: &Index, uri: &Url, visited: &mut HashSet<Url>) -> BTreeSet<String> {
     if !visited.insert(uri.clone()) {
         return BTreeSet::new();
     }
