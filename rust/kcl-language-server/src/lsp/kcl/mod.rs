@@ -136,6 +136,7 @@ mod navigation;
 #[cfg(not(target_arch = "wasm32"))]
 mod project;
 mod rename;
+mod shapes;
 mod source_hover;
 
 const SEMANTIC_TOKEN_TYPES: [SemanticTokenType; 10] = [

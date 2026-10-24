@@ -252,6 +252,24 @@ impl Backend {
             source.to_owned()
         };
         let (index, _) = self.navigation_index_with_source(uri, false, Some(recovered)).await;
+        if let Some(fields) = super::shapes::member_fields(&index, uri, offset) {
+            let items = fields
+                .into_iter()
+                .map(|(name, shape)| CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::FIELD),
+                    detail: (!shape.label.is_empty()).then_some(shape.label),
+                    text_edit: Some(CompletionTextEdit::Edit(TextEdit { range, new_text: name })),
+                    ..Default::default()
+                })
+                .collect();
+            return Some(LexicalCompletions {
+                items,
+                namespace: Some(String::new()),
+                range,
+                excluded,
+            });
+        }
         Some(LexicalCompletions {
             items: binding_items(&index, uri, offset, range, namespace.as_deref()),
             namespace,

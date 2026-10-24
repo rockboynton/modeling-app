@@ -117,7 +117,9 @@ Completion uses the same lexical scopes and import resolution. It offers visible
 parameters and local bindings, follows public module members and reexports,
 and reads unsaved imports. Member completion supports incomplete `module.` and
 `module::` expressions and replaces the full identifier at the cursor. Object
-field inference and automatic imports are not currently provided.
+fields are inferred conservatively from literals, annotated parameters and type
+aliases, array elements, and declared function return types, including imports.
+Automatic imports are not currently provided.
 
 Inlay hints show inferred types and units for top-level variable declarations
 after successful execution. They reuse the diagnostic pass, skip explicitly
