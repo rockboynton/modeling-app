@@ -131,8 +131,9 @@ Changed buffers, failed checks, and closed documents invalidate hints. Clients
 that support workspace hint refresh are notified after each diagnostic pass,
 including passes triggered by imported buffers. Nested locals also receive
 conservative source type hints from literals and lexical annotations without
-execution; unknown types are omitted. Parameter-name hints are not currently
-provided.
+execution; unknown types are omitted. Parameter-name hints label unlabeled
+arguments of resolved user and built-in functions, except matching variable
+names and pipe substitutions. Already named arguments receive no extra label.
 
 The standalone native server checks each document with fresh mock execution,
 using its actual file path and nearest optional `project.toml`. Imports resolve

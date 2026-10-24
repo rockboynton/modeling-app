@@ -120,6 +120,60 @@ impl Backend {
                         data: None,
                     });
                 }
+                if let crate::walk::Node::CallExpressionKw(call) = node
+                    && let Some(argument) = &call.unlabeled
+                    && !matches!(argument, Expr::PipeSubstitution(_))
+                {
+                    let occurrence = super::navigation::Occurrence {
+                        name: call.callee.name.name.clone(),
+                        qualifier: (!call.callee.path.is_empty()).then(|| {
+                            call.callee
+                                .path
+                                .iter()
+                                .map(|p| p.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join("::")
+                        }),
+                        span: crate::SourceRange::from(&call.callee.name),
+                        declaration: false,
+                        import_name: false,
+                        callee: None,
+                        type_context: false,
+                    };
+                    let name = if let Some(function) = super::calls::function(&index, uri, &occurrence) {
+                        function
+                            .ast
+                            .params
+                            .iter()
+                            .find(|p| !p.labeled)
+                            .map(|p| p.identifier.name.clone())
+                    } else if super::navigation::resolve_occurrence(&index, uri, &occurrence, true).is_some() {
+                        None
+                    } else {
+                        self.stdlib_args_for_position(&program, call.start)
+                            .get(&call.callee.to_string())
+                            .and_then(|args| {
+                                args.iter()
+                                    .find(|(_, arg)| !arg.props.is_labelled())
+                                    .map(|(name, _)| name.clone())
+                            })
+                    };
+                    if let Some(name) = name
+                        && !matches!(argument, Expr::Name(value) if value.path.is_empty() && value.name.name == name)
+                        && let Some(position) = kcl_lib::byte_to_lsp_position(&source, argument.start())
+                    {
+                        source_hints.borrow_mut().push(InlayHint {
+                            position,
+                            label: InlayHintLabel::String(format!("{name}:")),
+                            kind: Some(InlayHintKind::PARAMETER),
+                            padding_left: Some(false),
+                            padding_right: Some(true),
+                            text_edits: None,
+                            tooltip: None,
+                            data: None,
+                        });
+                    }
+                }
                 Ok::<_, anyhow::Error>(true)
             });
             hints.extend(source_hints.into_inner());
@@ -356,6 +410,35 @@ mod tests {
         assert_eq!(
             hints[0].position,
             kcl_lib::byte_to_lsp_position(source, source.find("local =").unwrap() + 5).unwrap()
+        );
+    }
+    #[tokio::test]
+    async fn parameter_hints_follow_imports_and_omit_matching_names_and_named_arguments() {
+        let server = crate::lsp::test_util::kcl_lsp_server(false).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("dims.kcl"),
+            "@settings(kclVersion = 3.0)\nexport fn twice(@width: number(mm)) { return width * 2 }\n",
+        )
+        .unwrap();
+        let uri = Url::from_file_path(dir.path().join("main.kcl")).unwrap();
+        let source = "@settings(kclVersion = 3.0)\nimport twice as double from \"dims.kcl\"\nwidth = 2mm\na = double(3mm)\nb = double(width)\nc = cos(0deg)\nfn named(height: number(mm)) { return height }\nd = named(height = 4mm)\n";
+        server
+            .did_open(DidOpenTextDocumentParams {
+                text_document: item(&uri, source),
+            })
+            .await;
+        let hints = server.inlay_hint(params(&uri, all())).await.unwrap().unwrap();
+        assert_eq!(hints.len(), 2, "{hints:?}");
+        assert_eq!(label(&hints[0]), "width:");
+        assert_eq!(hints[0].kind, Some(InlayHintKind::PARAMETER));
+        assert_eq!(
+            hints[0].position,
+            kcl_lib::byte_to_lsp_position(source, source.find("3mm").unwrap()).unwrap()
+        );
+        assert_eq!(
+            hints[1].position,
+            kcl_lib::byte_to_lsp_position(source, source.find("0deg").unwrap()).unwrap()
         );
     }
 }
