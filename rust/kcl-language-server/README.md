@@ -99,6 +99,10 @@ module comments. Source documentation works without execution and uses unsaved
 editor buffers. Variable hovers retain available runtime types and values, with
 source comments appended. Built-in hover documentation is also supported.
 
+Signature help resolves user functions through lexical scopes and imports,
+shows source parameter types and documentation, and tracks the active parameter
+by argument label when named arguments are reordered.
+
 Rename updates lexical bindings and their project references with targeted edits,
 preserving formatting, comments, and explicit import aliases. Renaming an alias
 updates its local binding; renaming an exported name updates import selectors

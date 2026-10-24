@@ -18,7 +18,7 @@ use crate::parsing::token::TokenType;
 use crate::parsing::token::adapter;
 use crate::walk::Node;
 
-fn documentation(comments: &[String]) -> String {
+pub(super) fn documentation(comments: &[String]) -> String {
     comments
         .iter()
         .map(|comment| {

@@ -127,6 +127,7 @@ use crate::parsing::token::RESERVED_WORDS;
 use crate::parsing::token::TokenStream;
 use crate::parsing::token::adapter;
 
+mod calls;
 mod completion;
 pub mod custom_notifications;
 mod hints;
@@ -1439,6 +1440,9 @@ impl LanguageServer for Backend {
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> RpcResult<Option<SignatureHelp>> {
+        if let Some(signature) = self.source_signature_help(&params.text_document_position_params).await {
+            return Ok(Some(signature));
+        }
         let filename = params.text_document_position_params.text_document.uri.to_string();
 
         let Some(current_code) = self.code_map.get(&filename) else {
